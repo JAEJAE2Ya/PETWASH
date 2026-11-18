@@ -83,6 +83,14 @@ button.confirming { background: var(--bad); color: #fff; border-color: var(--bad
 .rec-list li.ok { border-color: var(--ok); }
 .rec-list li.warn { border-color: var(--warn); }
 .rec-list li.alert { border-color: var(--bad); }
+.rec-list li.progress { border-color: var(--accent); }
+button.done { background: #e6f4ea; color: var(--ok); border-color: #b7dfc2; font-weight: bold; opacity: 1; cursor: default; }
+.toast { position: fixed; left: 50%; top: 16px; transform: translate(-50%, -150%); transition: transform 0.25s;
+  padding: 12px 20px; border-radius: 8px; color: #fff; font-weight: bold; z-index: 100; max-width: calc(100% - 32px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2); }
+.toast.show { transform: translate(-50%, 0); }
+.toast.ok { background: var(--ok); }
+.toast.bad { background: var(--bad); }
 .rec-list .act { font-weight: bold; }
 .rec-list .why { font-size: 13px; color: var(--muted); margin-top: 2px; }
 

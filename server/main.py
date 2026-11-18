@@ -80,6 +80,7 @@ def on_mqtt_message(topic: str, payload: dict):
         state["device_status"] = payload
         check_setpoint_result(payload)
         push({"type": "device_status", "data": payload})
+        update_recommendation()  # 장치 적용 여부가 바뀌면 추천 화면도 바로 갱신
 
 
 def now_iso() -> str:
@@ -156,7 +157,18 @@ def compute_recommendation() -> dict:
     if b["final_grade"] is None:
         hint = f" (시스템 제안 등급: {b['suggested_grade']})" if b["suggested_grade"] is not None else ""
         return {"available": False, "message": "배치 관리 화면에서 등급을 먼저 확정하세요." + hint}
-    rec = recommend(b["final_grade"], config.load_recipes(), state["sensor"], decay_tracker.rate())
+    recipes = config.load_recipes()
+    r = recipes["grades"][b["final_grade"]]
+    # 장치가 이 배치에 이 레시피 목표값을 이미 적용해서 세척 중인지 확인
+    st = state["device_status"] or {}
+    ap = st.get("applied") or {}
+    applied = (
+        state["device_online"] and st.get("state") == "세척 중" and ap.get("batch_id") == b["batch_id"]
+        and float(ap.get("target_concentration_pct", -1)) == r["concentration_pct"]
+        and float(ap.get("target_temp_c", -1)) == r["temp_c"]
+        and float(ap.get("wash_time_min", -1)) == r["wash_time_min"]
+    )
+    rec = recommend(b["final_grade"], recipes, state["sensor"], decay_tracker.rate(), applied)
     rec["batch_id"] = b["batch_id"]
     return rec
 

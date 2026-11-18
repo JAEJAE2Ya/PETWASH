@@ -50,11 +50,14 @@ class DecayTracker:
 
 
 def _item(kind: str, level: str, action: str, reason: str) -> dict:
-    # level: ok(유지) / warn(조치 필요) / alert(주의 깊게 볼 것)
+    # level: ok(유지) / progress(장치가 자동으로 맞추는 중) / warn(조치 필요) / alert(주의 깊게 볼 것)
     return {"kind": kind, "level": level, "action": action, "reason": reason}
 
 
-def recommend(grade: int, recipes: dict, sensor: dict | None, decay: tuple | None) -> dict:
+def recommend(grade: int, recipes: dict, sensor: dict | None, decay: tuple | None,
+              applied: bool = False) -> dict:
+    """applied=True 이면 장치가 이미 이 레시피 목표값으로 제어 중이므로,
+    "필요" 대신 장치가 지금 하고 있는 일(가열 중, 투입 중)로 표시한다."""
     recipe = recipes["grades"][grade]
     tol = recipes["tolerance"]
     target = {
@@ -62,7 +65,8 @@ def recommend(grade: int, recipes: dict, sensor: dict | None, decay: tuple | Non
         "target_temp_c": recipe["temp_c"],
         "wash_time_min": recipe["wash_time_min"],
     }
-    result = {"available": True, "grade": grade, "grade_name": recipe["name"], "target": target, "items": []}
+    result = {"available": True, "grade": grade, "grade_name": recipe["name"], "target": target,
+              "applied": applied, "items": []}
     if sensor is None:
         result["items"].append(_item("sensor", "alert", "센서 값 없음", "장치에서 센서 값을 아직 받지 못했습니다."))
         return result
@@ -73,9 +77,17 @@ def recommend(grade: int, recipes: dict, sensor: dict | None, decay: tuple | Non
     diff = conc - t_conc
     basis = f"현재 농도 {conc:.2f}%, 목표 {t_conc}% (허용오차 ±{c_tol}%p)"
     if diff < -c_tol:
-        items.append(_item("concentration", "warn", f"약품 추가 필요 (약 {-diff:.2f}%p 부족)", basis + f" → {-diff:.2f}%p 낮음"))
+        if applied:
+            items.append(_item("concentration", "progress", f"장치가 약품 투입 중 (목표까지 {-diff:.2f}%p)", basis))
+        else:
+            items.append(_item("concentration", "warn", f"약품 추가 필요 (약 {-diff:.2f}%p 부족)", basis + f" → {-diff:.2f}%p 낮음"))
     elif diff > c_tol:
-        items.append(_item("concentration", "warn", "약품 투입 중단, 필요 시 물 보충", basis + f" → {diff:.2f}%p 높음"))
+        # 장치는 농도를 낮출 수 없다 (물 보충 장치 없음) → 적용 중이어도 작업자 조치가 필요할 수 있음
+        if applied:
+            items.append(_item("concentration", "warn", "농도 높음: 약품 투입 멈춤, 소모되며 내려가는 중 (빨리 낮추려면 물 보충)",
+                               basis + f" → {diff:.2f}%p 높음"))
+        else:
+            items.append(_item("concentration", "warn", "약품 투입 중단, 필요 시 물 보충", basis + f" → {diff:.2f}%p 높음"))
     else:
         items.append(_item("concentration", "ok", "농도 유지", basis + " → 허용오차 이내"))
 
@@ -84,9 +96,15 @@ def recommend(grade: int, recipes: dict, sensor: dict | None, decay: tuple | Non
     diff = temp - t_temp
     basis = f"현재 온도 {temp:.1f}°C, 목표 {t_temp}°C (허용오차 ±{t_tol}°C)"
     if diff < -t_tol:
-        items.append(_item("temp", "warn", f"가열 필요 (약 {-diff:.1f}°C 부족)", basis + f" → {-diff:.1f}°C 낮음"))
+        if applied:
+            items.append(_item("temp", "progress", f"장치가 히터 가동 중 (목표까지 {-diff:.1f}°C)", basis))
+        else:
+            items.append(_item("temp", "warn", f"가열 필요 (약 {-diff:.1f}°C 부족)", basis + f" → {-diff:.1f}°C 낮음"))
     elif diff > t_tol:
-        items.append(_item("temp", "warn", "가열 중단, 자연 냉각 대기", basis + f" → {diff:.1f}°C 높음"))
+        if applied:
+            items.append(_item("temp", "progress", f"히터 꺼짐, 식는 중 (목표보다 {diff:.1f}°C 높음)", basis))
+        else:
+            items.append(_item("temp", "warn", "가열 중단, 자연 냉각 대기", basis + f" → {diff:.1f}°C 높음"))
     else:
         items.append(_item("temp", "ok", "온도 유지", basis + " → 허용오차 이내"))
 

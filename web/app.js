@@ -405,12 +405,27 @@ function renderRecommendation() {
     return;
   }
   const t = r.target;
+  // 승인 버튼: 이미 장치가 이 목표값으로 제어 중이면 "적용됨"으로 잠근다
+  const btn = $("btn-approve");
+  if (r.applied) {
+    app.approving = false;
+    btn.disabled = true;
+    btn.className = "done";
+    btn.textContent = "✓ 장치에 적용됨 · 이 목표값으로 제어 중";
+  } else if (app.approving) {
+    btn.disabled = true;
+    btn.className = "primary";
+    btn.textContent = "전송 중… 장치 응답 대기";
+  } else {
+    btn.disabled = false;
+    btn.className = "primary";
+    btn.textContent = "추천 승인 (레시피 목표값 전송)";
+  }
   $("rec-head").innerHTML = `배치 <b>${r.batch_id}</b> · 등급 ${r.grade} (${r.grade_name}) 레시피 목표: ` +
     `농도 ${t.target_concentration_pct}% · 온도 ${t.target_temp_c}°C · 세척 ${t.wash_time_min}분`;
   $("rec-items").innerHTML = r.items
     .map((i) => `<li class="${i.level}"><div class="act">${i.action}</div><div class="why">근거: ${i.reason}</div></li>`)
     .join("");
-  $("btn-approve").disabled = false;
 }
 
 async function loadDecisions() {
@@ -426,7 +441,30 @@ async function loadDecisions() {
       </tr>`).join("");
 }
 
-$("btn-approve").onclick = () => api("POST", "/api/recommendation/approve", null, "rec-error");
+$("btn-approve").onclick = async () => {
+  app.approving = true;
+  renderRecommendation();
+  const ok = await api("POST", "/api/recommendation/approve", null, "rec-error");
+  if (!ok) { app.approving = false; renderRecommendation(); return; }
+  // 10초 안에 장치 응답이 없으면 버튼을 다시 풀어 준다 (장치가 꺼져 있는 경우 등)
+  setTimeout(() => {
+    if (app.approving) {
+      app.approving = false;
+      renderRecommendation();
+      showToast("장치 응답이 없습니다. 장치 연결 상태를 확인하세요.", "bad");
+    }
+  }, 10000);
+};
+
+// 화면 위쪽에 잠깐 나타나는 알림 (브라우저 팝업 대신 사용)
+let toastTimer = null;
+function showToast(text, kind = "ok") {
+  const el = $("toast");
+  el.textContent = text;
+  el.className = `toast ${kind} show`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 3500);
+}
 confirmButton($("btn-water"), "한 번 더 누르면 교체 (농도·온도가 내려감)",
   () => api("POST", "/api/device/replace_water", null, "rec-error"));
 
@@ -576,6 +614,13 @@ function connect() {
         break;
       case "setpoint":
         app.lastSetpoint = msg.data;
+        // 장치가 응답하면 결과를 알림으로 보여 준다
+        if (msg.data.result === "적용됨") {
+          showToast(`장치에 적용되었습니다: 농도 ${msg.data.target_concentration_pct}% · ${msg.data.target_temp_c}°C · ${msg.data.wash_time_min}분`);
+        } else if (msg.data.result === "거부됨") {
+          app.approving = false;
+          showToast("장치가 목표값을 거부했습니다: " + msg.data.result_message, "bad");
+        }
         break;
       case "sensor":
         app.sensor = msg.data;
