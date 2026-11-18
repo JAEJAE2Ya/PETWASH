@@ -18,6 +18,20 @@ CREATE TABLE IF NOT EXISTS setpoints (
     result_at TEXT,
     result_message TEXT
 );
+
+CREATE TABLE IF NOT EXISTS batches (
+    batch_id TEXT PRIMARY KEY,        -- 예: B20261118-001
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    ended_at TEXT,
+    status TEXT NOT NULL DEFAULT '생성됨',  -- 생성됨 / 진행 중 / 종료
+    note TEXT,
+    contaminated_n INTEGER NOT NULL DEFAULT 0,  -- 카메라 판정: 오염 병 수
+    clean_n INTEGER NOT NULL DEFAULT 0,         -- 카메라 판정: 비오염 병 수
+    suggested_grade INTEGER,          -- 시스템 제안 등급
+    final_grade INTEGER,              -- 작업자가 확정한 등급
+    graded_at TEXT
+);
 """
 
 
@@ -57,3 +71,41 @@ def recent_setpoints(limit: int = 10) -> list[dict]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM setpoints ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------- 배치 ----------------
+
+def create_batch(batch_id: str, created_at: str, note: str = "") -> dict:
+    with connect() as conn:
+        conn.execute("INSERT INTO batches (batch_id, created_at, note) VALUES (?, ?, ?)",
+                     (batch_id, created_at, note))
+    return get_batch(batch_id)
+
+
+def get_batch(batch_id: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM batches WHERE batch_id = ?", (batch_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_batch(batch_id: str, **fields):
+    cols = ", ".join(f"{k} = ?" for k in fields)
+    with connect() as conn:
+        conn.execute(f"UPDATE batches SET {cols} WHERE batch_id = ?", (*fields.values(), batch_id))
+
+
+def list_batches(limit: int = 30) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM batches ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def running_batch() -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM batches WHERE status = '진행 중' LIMIT 1").fetchone()
+    return dict(row) if row else None
+
+
+def count_batches_with_prefix(prefix: str) -> int:
+    with connect() as conn:
+        return conn.execute("SELECT COUNT(*) FROM batches WHERE batch_id LIKE ?", (prefix + "%",)).fetchone()[0]

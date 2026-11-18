@@ -50,3 +50,15 @@ def check_setpoint(conc: float, temp: float, minutes: float, safety: dict) -> li
         if not (lo <= value <= hi):
             errors.append(f"{name} {value}{unit}는 안전 한계({lo}~{hi}{unit}) 밖입니다")
     return errors
+
+
+def suggest_grade(ratio_pct: float, thresholds: list) -> tuple[int, str]:
+    """오염 비율(%)로 등급을 제안하고, 근거 문장도 함께 돌려준다"""
+    t0, t1, t2 = thresholds
+    if ratio_pct < t0:
+        return 0, f"오염 비율 {ratio_pct:.1f}% < {t0}% → 등급 0"
+    if ratio_pct < t1:
+        return 1, f"오염 비율 {ratio_pct:.1f}%: {t0}% 이상 {t1}% 미만 → 등급 1"
+    if ratio_pct < t2:
+        return 2, f"오염 비율 {ratio_pct:.1f}%: {t1}% 이상 {t2}% 미만 → 등급 2"
+    return 3, f"오염 비율 {ratio_pct:.1f}% ≥ {t2}% → 등급 3"

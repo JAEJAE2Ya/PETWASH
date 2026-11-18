@@ -133,7 +133,6 @@ function renderDevice() {
     msg += ` · 남은 시간 ${m}분 ${sec}초`;
   }
   $("v-device-msg").textContent = msg;
-  $("v-batch").textContent = s && s.batch_id ? s.batch_id : "없음";
 }
 
 function renderAlerts() {
@@ -241,11 +240,149 @@ function renderControl() {
   }
 }
 
+// ---------------- 배치 관리 ----------------
+async function api(method, url, body, errEl) {
+  if (errEl) $(errEl).textContent = "";
+  const res = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const msg = [].concat(data.detail).map((d) => d.msg || d).join(", ");
+    if (errEl) $(errEl).textContent = msg;
+    else alert(msg);
+    return null;
+  }
+  return data;
+}
+
+const gradeName = (g) => (g == null ? "-" : `${g} (${app.recipes ? app.recipes.grades[g].name : ""})`);
+
+let renderedBatchId = undefined; // 현재 그려 둔 배치 (바뀔 때만 구조를 새로 그림)
+
+function renderBatch() {
+  const b = app.batch;
+  const box = $("cur-batch");
+  const id = b ? b.batch_id : null;
+
+  // 배치가 바뀌었을 때만 화면 구조를 다시 만든다 (등급 선택 상자가 초기화되지 않도록)
+  if (id !== renderedBatchId) {
+    renderedBatchId = id;
+    if (!b) {
+      box.innerHTML = `<p class="hint">진행 중인 배치가 없습니다. 아래에서 새 배치를 만들고 "시작"을 누르세요.</p>`;
+    } else {
+      const options = [0, 1, 2, 3].map((g) => `<option value="${g}">등급 ${gradeName(g)}</option>`).join("");
+      box.innerHTML = `
+        <table class="kv">
+          <tr><th>배치</th><td><b>${b.batch_id}</b></td></tr>
+          <tr><th>메모</th><td>${b.note || "-"}</td></tr>
+          <tr><th>시작 시각</th><td>${fmtTime(b.started_at)}</td></tr>
+        </table>
+        <div class="counts">
+          <div class="count-box"><div class="n" id="b-cont">0</div><div class="l">오염 판정</div></div>
+          <div class="count-box"><div class="n" id="b-clean">0</div><div class="l">비오염 판정</div></div>
+          <div class="count-box"><div class="n" id="b-total">0</div><div class="l">합계</div></div>
+          <div class="count-box"><div class="n" id="b-ratio">-</div><div class="l">오염 비율</div></div>
+        </div>
+        <div class="ratio-bar"><div id="b-bar" style="width:0%"></div></div>
+        <table class="kv">
+          <tr><th>시스템 제안 등급</th><td id="b-suggest">-</td></tr>
+          <tr><th>제안 근거</th><td id="b-reason">-</td></tr>
+          <tr><th>작업자 확정 등급</th><td id="b-final">-</td></tr>
+        </table>
+        <div class="grade-row">
+          <label for="b-grade">최종 등급</label>
+          <select id="b-grade">${options}</select>
+          <button id="btn-grade" class="primary">등급 확정</button>
+        </div>
+        <div class="btn-row"><button id="btn-end" class="danger">배치 종료</button></div>`;
+      $("b-grade").value = b.final_grade ?? b.suggested_grade ?? 0;
+      $("btn-grade").onclick = async () => {
+        const ok = await api("POST", `/api/batches/${b.batch_id}/grade`, { grade: Number($("b-grade").value) }, "batch-error");
+        if (ok) $("b-grade").dataset.touched = ""; // 확정 후에는 다시 확정 등급을 따라감
+      };
+      $("btn-end").onclick = () => {
+        if (confirm(`${b.batch_id} 배치를 종료할까요? 장치의 펌프·히터가 정지됩니다.`))
+          api("POST", `/api/batches/${b.batch_id}/end`, null, "batch-error");
+      };
+      $("b-grade").dataset.touched = "";
+      $("b-grade").onchange = () => ($("b-grade").dataset.touched = "1");
+    }
+  }
+  if (!b) return;
+
+  // 숫자 갱신
+  $("b-cont").textContent = b.contaminated_n;
+  $("b-clean").textContent = b.clean_n;
+  $("b-total").textContent = b.total_n;
+  $("b-ratio").textContent = b.ratio_pct == null ? "-" : b.ratio_pct + "%";
+  $("b-bar").style.width = (b.ratio_pct || 0) + "%";
+  $("b-suggest").textContent = b.suggested_grade == null ? "판정 결과 대기 중" : `등급 ${gradeName(b.suggested_grade)}`;
+  $("b-reason").textContent = b.suggest_reason || "-";
+  $("b-final").innerHTML = b.final_grade == null
+    ? `<span class="st-wait">미확정</span>`
+    : `<span class="st-ok">등급 ${gradeName(b.final_grade)}</span> (${fmtTime(b.graded_at)})`;
+  // 작업자가 선택 상자를 건드리지 않았다면 확정 등급(없으면 제안 등급)을 따라가게 한다
+  const follow = b.final_grade ?? b.suggested_grade;
+  if (!$("b-grade").dataset.touched && follow != null) $("b-grade").value = follow;
+}
+
+async function loadBatches() {
+  const rows = await (await fetch("/api/batches")).json();
+  $("batch-list").innerHTML = rows.length === 0
+    ? `<tr><td colspan="10">배치가 없습니다</td></tr>`
+    : rows.map((b) => `<tr>
+        <td>${b.batch_id}</td>
+        <td>${b.status}</td>
+        <td>${b.note || ""}</td>
+        <td>${b.contaminated_n} / ${b.clean_n}</td>
+        <td>${b.ratio_pct == null ? "-" : b.ratio_pct + "%"}</td>
+        <td>${b.suggested_grade ?? "-"}</td>
+        <td>${b.final_grade ?? "-"}</td>
+        <td>${b.started_at ? fmtTime(b.started_at) : "-"}</td>
+        <td>${b.ended_at ? fmtTime(b.ended_at) : "-"}</td>
+        <td>${b.status === "생성됨" ? `<button data-start="${b.batch_id}">시작</button>` : ""}</td>
+      </tr>`).join("");
+  $("batch-list").querySelectorAll("[data-start]").forEach((btn) =>
+    (btn.onclick = () => api("POST", `/api/batches/${btn.dataset.start}/start`, null, "batch-error")));
+}
+
+// 카메라 판정이 0.3초마다 들어오므로 목록 새로고침은 최대 1.5초에 한 번만
+let listTimer = null;
+function scheduleLoadBatches() {
+  if (listTimer) return;
+  listTimer = setTimeout(() => { listTimer = null; loadBatches(); }, 1500);
+}
+
+$("btn-new-batch").onclick = async () => {
+  const b = await api("POST", "/api/batches", { note: $("new-note").value.trim() }, "batch-error");
+  if (b) { $("new-note").value = ""; loadBatches(); }
+};
+
+// 등급이 확정되면 세척 제어 슬라이더를 그 등급 레시피로 채워 둔다
+let filledGrade = null;
+function syncSlidersToGrade() {
+  const g = app.batch ? app.batch.final_grade : null;
+  if (g != null && g !== filledGrade && app.recipes && slidersReady) {
+    fillSliders(app.recipes.grades[g]);
+  }
+  filledGrade = g;
+}
+
 function renderAll() {
   renderSensor();
   renderDevice();
   renderAlerts();
   renderControl();
+  renderBatch();
+  syncSlidersToGrade();
+  const b = app.batch;
+  $("v-batch").textContent = b ? b.batch_id : "없음";
+  $("v-batch-sub").textContent = !b ? "" : b.final_grade != null
+    ? `확정 등급 ${gradeName(b.final_grade)}`
+    : b.suggested_grade != null ? `제안 등급 ${b.suggested_grade} (미확정)` : "카메라 판정 대기";
 }
 
 // ---------------- WebSocket ----------------
@@ -275,6 +412,12 @@ function connect() {
         app.mqttConnected = msg.data.mqtt_connected;
         app.influxError = msg.data.influx_error;
         app.lastSetpoint = msg.data.last_setpoint;
+        app.batch = msg.data.batch;
+        loadBatches();
+        break;
+      case "batch":
+        app.batch = msg.data;
+        scheduleLoadBatches();
         break;
       case "setpoint":
         app.lastSetpoint = msg.data;

@@ -21,7 +21,9 @@ class InfluxStore:
             self.last_error = ".env에 INFLUX_TOKEN이 없습니다"
             log.warning(self.last_error + " → InfluxDB 저장을 건너뜁니다")
             return
-        self.client = InfluxDBClient3(host=host, token=token, database=self.database)
+        # write_no_sync=True: InfluxDB 3가 디스크(WAL)에 기록할 때까지(약 1초) 기다리지 않고 바로 응답받는다.
+        # 기다리면 MQTT 메시지 처리가 1초에 1건으로 밀린다.
+        self.client = InfluxDBClient3(host=host, token=token, database=self.database, write_no_sync=True)
 
     def _write(self, point: Point):
         if self.client is None:

@@ -4,6 +4,7 @@
 """
 import asyncio
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -41,7 +42,9 @@ state = {
     "device_status": None,  # 마지막 장치 상태(하트비트)
     "device_online": False,
     "last_setpoint": None,  # 마지막으로 보낸 목표값 + 장치 적용 결과
+    "batch": None,          # 진행 중인 배치 (한 번에 1개)
 }
+batch_lock = threading.Lock()  # 카메라 집계(MQTT 스레드)와 웹 요청이 동시에 배치를 바꾸지 않도록
 last_heartbeat = 0.0
 
 ws_manager = WsManager()
@@ -63,7 +66,7 @@ def on_mqtt_message(topic: str, payload: dict):
         push({"type": "sensor", "data": payload})
     elif topic == config.TOPIC_CAMERA:
         influx.write_camera(payload)
-        push({"type": "camera", "data": payload})
+        count_camera_result(payload)
     elif topic == config.TOPIC_STATUS:
         last_heartbeat = time.time()
         state["device_status"] = payload
@@ -87,6 +90,43 @@ def check_setpoint_result(status: dict):
     db.update_setpoint_result(sp["issued_at"], sp["result"], sp["result_at"], sp["result_message"])
     log.info("목표값 %s: %s", sp["result"], sp["result_message"])
     push({"type": "setpoint", "data": sp})
+
+
+# ---------------- 배치 ----------------
+
+def batch_view(b: dict | None) -> dict | None:
+    """DB 배치 행에 화면에 필요한 값(총 개수, 오염 비율, 제안 근거)을 덧붙인다"""
+    if b is None:
+        return None
+    b = dict(b)
+    total = b["contaminated_n"] + b["clean_n"]
+    b["total_n"] = total
+    b["ratio_pct"] = round(b["contaminated_n"] / total * 100, 1) if total else None
+    b["suggest_reason"] = None
+    if total:
+        thresholds = config.load_recipes()["grade_thresholds_pct"]
+        b["suggested_grade"], b["suggest_reason"] = config.suggest_grade(b["ratio_pct"], thresholds)
+    return b
+
+
+def set_current_batch(b: dict | None):
+    state["batch"] = batch_view(b)
+    push({"type": "batch", "data": state["batch"]})
+
+
+def count_camera_result(msg: dict):
+    """카메라 판정 1건을 진행 중 배치에 집계하고 제안 등급을 다시 계산"""
+    with batch_lock:
+        b = state["batch"]
+        if b is None or msg.get("batch_id") != b["batch_id"]:
+            return  # 진행 중 배치가 아니면 집계하지 않음 (InfluxDB에는 저장됨)
+        key = "contaminated_n" if msg.get("label") == "contaminated" else "clean_n"
+        b[key] += 1
+        b = batch_view(b)
+        db.update_batch(b["batch_id"], contaminated_n=b["contaminated_n"], clean_n=b["clean_n"],
+                        suggested_grade=b["suggested_grade"])
+        state["batch"] = b
+    push({"type": "batch", "data": b})
 
 
 async def watch_heartbeat():
@@ -115,6 +155,7 @@ async def lifespan(app: FastAPI):
     db.init_db()
     recent = db.recent_setpoints(1)
     state["last_setpoint"] = recent[0] if recent else None
+    state["batch"] = batch_view(db.running_batch())  # 서버 재시작 시 진행 중 배치 복원
     mqtt_bridge.start()
     task = asyncio.create_task(watch_heartbeat())
     yield
@@ -164,7 +205,8 @@ def send_setpoint(sp_in: SetpointIn) -> dict:
         raise HTTPException(status_code=503, detail=["MQTT 브로커에 연결되지 않아 보낼 수 없습니다"])
 
     sp = sp_in.model_dump()
-    sp["batch_id"] = sp["batch_id"] or "TEST"
+    # 배치를 지정하지 않으면 진행 중 배치로 보낸다 (없으면 "수동")
+    sp["batch_id"] = sp["batch_id"] or (state["batch"]["batch_id"] if state["batch"] else "수동")
     sp["issued_at"] = now_iso()  # 장치가 회신할 때 이 값으로 어떤 명령인지 구분
     mqtt_bridge.publish(config.TOPIC_SETPOINT, sp)
     db.insert_setpoint(sp)
@@ -181,6 +223,87 @@ def post_setpoint(sp: SetpointIn):
 @app.get("/api/setpoints")
 def get_setpoints(limit: int = 10):
     return db.recent_setpoints(limit)
+
+
+class BatchIn(BaseModel):
+    note: str = ""
+
+
+class GradeIn(BaseModel):
+    grade: int
+
+
+def require_mqtt():
+    if not mqtt_bridge.connected:
+        raise HTTPException(status_code=503, detail=["MQTT 브로커에 연결되지 않았습니다"])
+
+
+def get_batch_or_404(batch_id: str) -> dict:
+    b = db.get_batch(batch_id)
+    if b is None:
+        raise HTTPException(status_code=404, detail=["배치를 찾을 수 없습니다"])
+    return b
+
+
+@app.get("/api/batches")
+def get_batches(limit: int = 30):
+    return [batch_view(b) for b in db.list_batches(limit)]
+
+
+@app.post("/api/batches")
+def create_batch(body: BatchIn):
+    # 배치 번호: B + 오늘 날짜 + 일련번호 (예: B20261118-001)
+    prefix = "B" + datetime.now().strftime("%Y%m%d") + "-"
+    batch_id = f"{prefix}{db.count_batches_with_prefix(prefix) + 1:03d}"
+    b = db.create_batch(batch_id, now_iso(), body.note)
+    push({"type": "batch", "data": state["batch"]})  # 목록 갱신 알림
+    return batch_view(b)
+
+
+@app.post("/api/batches/{batch_id}/start")
+def start_batch(batch_id: str):
+    require_mqtt()
+    with batch_lock:
+        b = get_batch_or_404(batch_id)
+        if b["status"] != "생성됨":
+            raise HTTPException(status_code=409, detail=[f"'{b['status']}' 상태의 배치는 시작할 수 없습니다"])
+        if state["batch"] is not None:
+            raise HTTPException(status_code=409, detail=[f"진행 중인 배치({state['batch']['batch_id']})를 먼저 종료하세요"])
+        db.update_batch(batch_id, status="진행 중", started_at=now_iso())
+        set_current_batch(db.get_batch(batch_id))
+    # 장치에 배치 시작 알림 → 카메라 판정 시작
+    mqtt_bridge.publish(config.TOPIC_BATCH, {"batch_id": batch_id, "action": "start", "ts": now_iso()})
+    log.info("배치 시작: %s", batch_id)
+    return state["batch"]
+
+
+@app.post("/api/batches/{batch_id}/grade")
+def set_grade(batch_id: str, body: GradeIn):
+    if body.grade not in config.load_recipes()["grades"]:
+        raise HTTPException(status_code=400, detail=["등급은 0~3 중 하나여야 합니다"])
+    with batch_lock:
+        b = get_batch_or_404(batch_id)
+        if b["status"] != "진행 중":
+            raise HTTPException(status_code=409, detail=["진행 중인 배치만 등급을 입력할 수 있습니다"])
+        db.update_batch(batch_id, final_grade=body.grade, graded_at=now_iso())
+        set_current_batch(db.get_batch(batch_id))
+    log.info("배치 %s 등급 확정: %d", batch_id, body.grade)
+    return state["batch"]
+
+
+@app.post("/api/batches/{batch_id}/end")
+def end_batch(batch_id: str):
+    with batch_lock:
+        b = get_batch_or_404(batch_id)
+        if b["status"] != "진행 중":
+            raise HTTPException(status_code=409, detail=["진행 중인 배치만 종료할 수 있습니다"])
+        db.update_batch(batch_id, status="종료", ended_at=now_iso())
+        set_current_batch(None)
+    # 장치에 배치 종료 알림 → 펌프·히터 정지 (MQTT가 끊겨 있으면 알림만 생략)
+    if mqtt_bridge.connected:
+        mqtt_bridge.publish(config.TOPIC_BATCH, {"batch_id": batch_id, "action": "stop", "ts": now_iso()})
+    log.info("배치 종료: %s", batch_id)
+    return batch_view(db.get_batch(batch_id))
 
 
 @app.websocket("/ws")
