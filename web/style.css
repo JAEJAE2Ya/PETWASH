@@ -76,6 +76,7 @@ table.list th { color: var(--muted); font-weight: normal; }
 .grade-row select { font: inherit; padding: 6px; }
 .btn-row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
 button.danger { color: var(--bad); border-color: #f5c2c0; }
+button.confirming { background: var(--bad); color: #fff; border-color: var(--bad); }
 
 .rec-list { list-style: none; padding: 0; margin: 0; }
 .rec-list li { border-left: 4px solid var(--line); padding: 6px 10px; margin-bottom: 6px; background: #fafbfc; border-radius: 0 6px 6px 0; }

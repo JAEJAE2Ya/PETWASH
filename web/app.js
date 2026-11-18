@@ -243,6 +243,29 @@ function renderControl() {
   }
 }
 
+// 되돌리기 어려운 버튼: 첫 클릭은 확인 문구로 바뀌고, 4초 안에 한 번 더 눌러야 실행된다.
+// (브라우저 confirm() 팝업은 일부 내장 브라우저에서 막혀서 항상 "취소"로 처리되므로 쓰지 않는다)
+function confirmButton(btn, confirmText, action) {
+  const original = btn.textContent;
+  let timer = null;
+  btn.onclick = () => {
+    if (!timer) {
+      btn.textContent = confirmText;
+      btn.classList.add("confirming");
+      timer = setTimeout(reset, 4000);
+      return;
+    }
+    reset();
+    action();
+  };
+  function reset() {
+    clearTimeout(timer);
+    timer = null;
+    btn.textContent = original;
+    btn.classList.remove("confirming");
+  }
+}
+
 // ---------------- 배치 관리 ----------------
 async function api(method, url, body, errEl) {
   if (errEl) $(errEl).textContent = "";
@@ -306,10 +329,8 @@ function renderBatch() {
         const ok = await api("POST", `/api/batches/${b.batch_id}/grade`, { grade: Number($("b-grade").value) }, "batch-error");
         if (ok) $("b-grade").dataset.touched = ""; // 확정 후에는 다시 확정 등급을 따라감
       };
-      $("btn-end").onclick = () => {
-        if (confirm(`${b.batch_id} 배치를 종료할까요? 장치의 펌프·히터가 정지됩니다.`))
-          api("POST", `/api/batches/${b.batch_id}/end`, null, "batch-error");
-      };
+      confirmButton($("btn-end"), "한 번 더 누르면 종료 (펌프·히터 정지)",
+        () => api("POST", `/api/batches/${b.batch_id}/end`, null, "batch-error"));
       $("b-grade").dataset.touched = "";
       $("b-grade").onchange = () => ($("b-grade").dataset.touched = "1");
     }
@@ -406,10 +427,8 @@ async function loadDecisions() {
 }
 
 $("btn-approve").onclick = () => api("POST", "/api/recommendation/approve", null, "rec-error");
-$("btn-water").onclick = () => {
-  if (confirm("세척수를 교체할까요? 약품 농도와 온도가 새 물 기준으로 내려갑니다."))
-    api("POST", "/api/device/replace_water", null, "rec-error");
-};
+confirmButton($("btn-water"), "한 번 더 누르면 교체 (농도·온도가 내려감)",
+  () => api("POST", "/api/device/replace_water", null, "rec-error"));
 
 // ---------------- 이력 ----------------
 function fmtDuration(s) {
