@@ -163,6 +163,8 @@ function renderDevice() {
   if (s && s.remaining_s != null && s.state === "세척 중") {
     const m = Math.floor(s.remaining_s / 60), sec = s.remaining_s % 60;
     msg += ` · 남은 시간 ${m}분 ${sec}초`;
+    const scale = s.time_scale || 1;
+    if (scale > 1) msg += ` (실제 약 ${fmtDuration(s.remaining_s / scale)})`;
   }
   $("v-device-msg").textContent = msg;
 }
@@ -577,8 +579,27 @@ $("btn-reset-settings").onclick = () => {
   if (app.recipes) fillSettings(app.recipes);
 };
 
+// ---------------- (테스트) 시연용 가속 ----------------
+// 실제 공정은 세척에 10~20분이 걸리므로, 시연 때는 시뮬레이터 안의 시간을 10배 빠르게 돌린다.
+function currentSpeed() {
+  return (app.deviceStatus && app.deviceStatus.time_scale) || 1;
+}
+
+function renderSpeed() {
+  const fast = currentSpeed() > 1;
+  $("btn-speed").textContent = fast ? "실제 시간으로 되돌리기" : "(테스트) 10배 가속";
+  $("btn-speed").classList.toggle("on", fast);
+  $("speed-text").textContent = fast
+    ? "시뮬레이터 시간이 10배 빠르게 흐르는 중입니다. 세척 12분 → 약 72초. 실제 공정 시간이 아닙니다."
+    : "실제 시간으로 동작 중 (세척 12분 = 실제 12분). 시연할 때는 10배 가속을 켜세요.";
+  $("speed-badge").hidden = !fast;
+}
+
+$("btn-speed").onclick = () => api("POST", "/api/device/speed", { speed: currentSpeed() > 1 ? 1 : 10 });
+
 function renderAll() {
   renderSensor();
+  renderSpeed();
   renderRecommendation();
   renderDevice();
   renderAlerts();

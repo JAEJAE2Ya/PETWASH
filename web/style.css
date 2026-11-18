@@ -56,6 +56,9 @@ nav { display: flex; flex-wrap: wrap; }
 .tab:focus-visible { outline: 2px dashed var(--blue); outline-offset: -4px; }
 
 .badge { margin-left: auto; padding: 2px 10px; font-family: var(--font-small); font-size: 12px; }
+.badge.speed { background: var(--amber); color: #fff; }
+.badge.speed:not([hidden]) + .badge { margin-left: 0; }
+.badge[hidden] { display: none; }
 .badge.on { background: var(--bg); color: var(--green); }
 .badge.off { background: var(--red-bg); color: #fff; animation: blink 1s steps(1) infinite; }
 
@@ -88,6 +91,11 @@ main { flex: 1; width: 100%; max-width: 1300px; margin: 0 auto; padding: 18px 16
 .alert.bad::before { content: "!! "; color: #ffff55; animation: blink 1s steps(1) infinite; }
 .alert.warn { color: var(--amber); background: var(--warn-bg); border: 1px solid var(--amber); }
 .alert.warn::before { content: "** "; }
+
+/* 시연용 가속 줄 */
+.demo-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.demo-bar .hint { margin: 0; }
+.demo-bar button.on { background: var(--amber); color: #fff; }
 
 /* 대시보드 카드 */
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 16px; }

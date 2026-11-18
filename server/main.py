@@ -53,6 +53,11 @@ decay_tracker = DecayTracker()
 batch_lock = threading.Lock()  # 카메라 집계(MQTT 스레드)와 웹 요청이 동시에 배치를 바꾸지 않도록
 last_heartbeat = 0.0
 
+# 장치 시간 시계: 시연용 가속(배속) 중에는 실제 시간보다 빨리 흐른다.
+# 농도 감소 속도(%p/분)를 "장치 시간" 기준으로 계산해야 배속과 상관없이 같은 판단이 나온다.
+device_clock = 0.0
+last_sensor_real = None
+
 ws_manager = WsManager()
 influx = InfluxStore()
 loop: asyncio.AbstractEventLoop | None = None
@@ -65,8 +70,12 @@ def push(msg: dict):
 
 
 def on_mqtt_message(topic: str, payload: dict):
-    global last_heartbeat
+    global last_heartbeat, device_clock, last_sensor_real
     if topic == config.TOPIC_SENSOR:
+        now = time.time()
+        if last_sensor_real is not None:
+            device_clock += (now - last_sensor_real) * payload.get("time_scale", 1)
+        last_sensor_real = now
         state["sensor"] = payload
         influx.write_sensor(payload)
         push({"type": "sensor", "data": payload})
@@ -147,7 +156,7 @@ def track_decay(sensor: dict):
     """장치가 현재 배치를 세척 중일 때만 농도 감소 속도 계산용 데이터를 모은다"""
     b, st = state["batch"], state["device_status"]
     if b and st and st.get("state") == "세척 중" and st.get("batch_id") == b["batch_id"]:
-        decay_tracker.add(b["batch_id"], time.time(), sensor["concentration_pct"], sensor["pump_on"])
+        decay_tracker.add(b["batch_id"], device_clock, sensor["concentration_pct"], sensor["pump_on"])
 
 
 def compute_recommendation() -> dict:
@@ -157,6 +166,9 @@ def compute_recommendation() -> dict:
     if b["final_grade"] is None:
         hint = f" (시스템 제안 등급: {b['suggested_grade']})" if b["suggested_grade"] is not None else ""
         return {"available": False, "message": "배치 관리 화면에서 등급을 먼저 확정하세요." + hint}
+    st = state["device_status"] or {}
+    if st.get("state") == "세척 완료" and st.get("batch_id") == b["batch_id"]:
+        return {"available": False, "message": "설정한 세척 시간이 끝났습니다. 배치 관리에서 배치를 종료하세요."}
     recipes = config.load_recipes()
     r = recipes["grades"][b["final_grade"]]
     # 장치가 이 배치에 이 레시피 목표값을 이미 적용해서 세척 중인지 확인
@@ -310,6 +322,19 @@ def approve_recommendation():
     result = send_setpoint(SetpointIn(batch_id=rec["batch_id"], issued_by="operator", **rec["target"]))
     log_decision("추천 승인", result)
     return result
+
+
+class SpeedIn(BaseModel):
+    speed: Literal[1, 10]
+
+
+@app.post("/api/device/speed")
+def set_speed(body: SpeedIn):
+    """(테스트) 시연용 가속: 시뮬레이터 안의 시간을 10배 빠르게 / 실제 시간으로"""
+    require_mqtt()
+    mqtt_bridge.publish(config.TOPIC_SIM, {"speed": body.speed, "ts": now_iso()})
+    log.info("시연용 배속 요청: x%d", body.speed)
+    return {"ok": True, "speed": body.speed}
 
 
 @app.post("/api/device/replace_water")

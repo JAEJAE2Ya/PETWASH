@@ -18,9 +18,12 @@ TEMP_BAND = 0.5
 
 
 class LocalController:
-    def __init__(self):
+    def __init__(self, clock=time.time):
+        # clock: 현재 시각(초)을 돌려주는 함수. 실제 장치는 time.time,
+        # 시뮬레이터는 시연용 가속을 위해 "시뮬레이션 시계"를 넘겨준다.
+        self.clock = clock
         self.setpoint = None     # 현재 적용 중인 목표값 (dict)
-        self.wash_started = None  # 세척 시작 시각 (time.time())
+        self.wash_started = None  # 세척 시작 시각 (clock 기준)
         self.state = "대기"
         self.message = "목표값을 기다리는 중"
         self.pump_on = False
@@ -56,7 +59,7 @@ class LocalController:
         self.setpoint = dict(sp)
         # 같은 배치 안에서 목표값만 바뀐 경우에는 세척 타이머를 이어간다
         if not same_batch or self.wash_started is None:
-            self.wash_started = time.time()
+            self.wash_started = self.clock()
         self.state = "세척 중"
         self.message = f"목표값 적용 ({sp.get('issued_by', '?')})"
         return True
@@ -72,7 +75,7 @@ class LocalController:
         if self.setpoint is None or self.wash_started is None:
             return None
         total = float(self.setpoint["wash_time_min"]) * 60
-        return max(0.0, total - (time.time() - self.wash_started))
+        return max(0.0, total - (self.clock() - self.wash_started))
 
     def update(self, reading: dict) -> tuple[bool, bool]:
         """센서 값을 보고 (펌프, 히터) on/off 를 결정"""

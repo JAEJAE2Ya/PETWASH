@@ -21,9 +21,10 @@ TOPIC_CAMERA = "petwash/camera/result"
 TOPIC_SETPOINT = "petwash/control/setpoint"
 TOPIC_STATUS = "petwash/device/status"
 TOPIC_BATCH = "petwash/control/batch"  # 서버→장치: 배치 시작/종료 알림 (추가 토픽)
+TOPIC_SIM = "petwash/control/sim"      # 서버→시뮬레이터: 시연용 배속 (추가 토픽, 실제 장치는 무시)
 
 HEARTBEAT_TIMEOUT_S = 15  # 이 시간 이상 하트비트가 없으면 "장치 연결 끊김"
-SENSOR_INTERVAL_S = 2     # 장치가 센서 값을 보내는 간격 (가동 시간 계산에 사용)
+SENSOR_INTERVAL_S = 2     # 장치가 센서 값을 보내는 간격, 장치 시간 기준 (가동 시간 계산에 사용)
 
 
 def load_recipes() -> dict:
