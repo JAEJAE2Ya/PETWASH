@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>폐페트병 세척 공정 관리</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>폐페트병 세척 공정 관리</h1>
+    <nav>
+      <button class="tab active" data-tab="dashboard">대시보드</button>
+      <button class="tab" data-tab="batch">배치 관리</button>
+      <button class="tab" data-tab="control">세척 제어</button>
+      <button class="tab" data-tab="history">이력</button>
+      <button class="tab" data-tab="settings">설정</button>
+    </nav>
+    <span id="conn" class="badge off">서버 연결 중…</span>
+  </header>
+
+  <main>
+    <!-- 대시보드 -->
+    <section id="tab-dashboard" class="page active">
+      <div id="alerts"></div>
+
+      <div class="cards">
+        <div class="card"><div class="label">진행 중 배치</div><div class="value" id="v-batch">-</div></div>
+        <div class="card"><div class="label">장치</div><div class="value" id="v-device">-</div><div class="sub" id="v-device-msg"></div></div>
+        <div class="card"><div class="label">약품 농도</div><div class="value"><span id="v-conc">-</span> %</div><div class="sub" id="t-conc"></div></div>
+        <div class="card"><div class="label">온도</div><div class="value"><span id="v-temp">-</span> °C</div><div class="sub" id="t-temp"></div></div>
+        <div class="card"><div class="label">탁도</div><div class="value"><span id="v-turb">-</span> NTU</div><div class="sub" id="t-turb"></div></div>
+        <div class="card"><div class="label">수위</div><div class="value"><span id="v-level">-</span> %</div></div>
+        <div class="card"><div class="label">펌프</div><div class="value" id="v-pump">-</div></div>
+        <div class="card"><div class="label">히터</div><div class="value" id="v-heater">-</div></div>
+      </div>
+
+      <div class="charts">
+        <div class="chart-box"><h3>약품 농도 (%)</h3><canvas id="c-conc"></canvas></div>
+        <div class="chart-box"><h3>온도 (°C)</h3><canvas id="c-temp"></canvas></div>
+        <div class="chart-box"><h3>탁도 (NTU)</h3><canvas id="c-turb"></canvas></div>
+      </div>
+    </section>
+
+    <section id="tab-batch" class="page"><p class="todo">3단계에서 만들 화면입니다.</p></section>
+    <section id="tab-control" class="page"><p class="todo">2·4단계에서 만들 화면입니다.</p></section>
+    <section id="tab-history" class="page"><p class="todo">5단계에서 만들 화면입니다.</p></section>
+    <section id="tab-settings" class="page"><p class="todo">5단계에서 만들 화면입니다.</p></section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

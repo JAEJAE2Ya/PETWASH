@@ -1,0 +1,47 @@
+# 등급별 세척 레시피 (예시값, 웹 설정 화면에서 수정 가능)
+# expected_decay_pct_per_min: 세척 중 약품 농도가 분당 줄어드는 기대 속도(%p/분)
+grades:
+  0:
+    name: 깨끗
+    concentration_pct: 1.0
+    temp_c: 65
+    wash_time_min: 10
+    expected_decay_pct_per_min: 0.04
+  1:
+    name: 낮음
+    concentration_pct: 1.5
+    temp_c: 70
+    wash_time_min: 12
+    expected_decay_pct_per_min: 0.06
+  2:
+    name: 보통
+    concentration_pct: 2.0
+    temp_c: 75
+    wash_time_min: 15
+    expected_decay_pct_per_min: 0.10
+  3:
+    name: 높음
+    concentration_pct: 2.5
+    temp_c: 80
+    wash_time_min: 20
+    expected_decay_pct_per_min: 0.15
+
+# 오염 비율(%) → 등급 제안 기준: 10 미만 0, 30 미만 1, 60 미만 2, 그 이상 3
+grade_thresholds_pct: [10, 30, 60]
+
+# 추천 로직 허용오차
+tolerance:
+  concentration_pct: 0.2
+  temp_c: 2.0
+
+# 탁도가 이 값을 넘으면 세척수 교체 권장
+turbidity_limit_ntu: 50
+
+# 실제 농도 감소 속도가 기대치의 몇 배를 넘으면 "등급 상향 검토"
+decay_alert_factor: 1.5
+
+# 안전 한계 (서버와 장치가 모두 검사)
+safety:
+  concentration_pct: [0.5, 3.0]
+  temp_c: [40, 85]
+  wash_time_min: [5, 30]
