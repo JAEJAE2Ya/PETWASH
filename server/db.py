@@ -47,6 +47,23 @@ CREATE TABLE IF NOT EXISTS decisions (    -- 추천에 대한 작업자 결정 �
     applied_temp_c REAL,
     applied_wash_time_min REAL
 );
+
+CREATE TABLE IF NOT EXISTS batch_summaries (  -- 배치 종료 시 저장하는 요약 (InfluxDB는 긴 기간 조회가 어려우므로)
+    batch_id TEXT PRIMARY KEY,
+    wash_start TEXT,                  -- 요약 계산 시작 시각 (첫 목표값 적용 시각, 없으면 배치 시작)
+    wash_end TEXT,
+    samples INTEGER,                  -- 센서 측정 개수
+    avg_concentration_pct REAL,
+    avg_temp_c REAL,
+    avg_turbidity_ntu REAL,
+    max_turbidity_ntu REAL,
+    pump_on_s REAL,                   -- 약품 투입(펌프 가동) 시간, 초
+    heater_on_s REAL,                 -- 히터 가동 시간, 초
+    applied_concentration_pct REAL,   -- 마지막으로 장치에 적용된 목표값
+    applied_temp_c REAL,
+    applied_wash_time_min REAL,
+    setpoint_count INTEGER            -- 이 배치에서 적용된 목표값 개수
+);
 """
 
 
@@ -142,4 +159,30 @@ def recent_decisions(limit: int = 10, batch_id: str | None = None) -> list[dict]
                                 (batch_id, limit)).fetchall()
         else:
             rows = conn.execute("SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------- 배치 요약·이력 ----------------
+
+def applied_setpoints(batch_id: str) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM setpoints WHERE batch_id = ? AND result = '적용됨' ORDER BY id",
+                            (batch_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_summary(summary: dict):
+    cols = ", ".join(summary.keys())
+    marks = ", ".join("?" for _ in summary)
+    with connect() as conn:
+        conn.execute(f"INSERT OR REPLACE INTO batch_summaries ({cols}) VALUES ({marks})", tuple(summary.values()))
+
+
+def history(limit: int = 200) -> list[dict]:
+    """종료된 배치 + 요약 (요약이 없으면 요약 칸은 비어 있음)"""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT b.*, s.* , b.batch_id AS batch_id FROM batches b "
+            "LEFT JOIN batch_summaries s ON s.batch_id = b.batch_id "
+            "WHERE b.status = '종료' ORDER BY b.ended_at DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]

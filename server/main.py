@@ -3,6 +3,8 @@
 실행 (PET 폴더에서):  .venv\\Scripts\\python -m uvicorn server.main:app --port 8000
 """
 import asyncio
+import csv
+import io
 import logging
 import threading
 import time
@@ -11,8 +13,9 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import config, db
 from .influx import InfluxStore
@@ -398,7 +401,135 @@ def end_batch(batch_id: str):
     if mqtt_bridge.connected:
         mqtt_bridge.publish(config.TOPIC_BATCH, {"batch_id": batch_id, "action": "stop", "ts": now_iso()})
     log.info("배치 종료: %s", batch_id)
+    summarize_batch(batch_id)
     return batch_view(db.get_batch(batch_id))
+
+
+def summarize_batch(batch_id: str) -> dict:
+    """배치 요약을 계산해서 SQLite에 저장 (세척 구간 = 첫 목표값 적용 ~ 배치 종료)"""
+    b = db.get_batch(batch_id)
+    applied = db.applied_setpoints(batch_id)
+    start = applied[0]["issued_at"] if applied else b["started_at"]
+    end = b["ended_at"]
+    summary = {"batch_id": batch_id, "wash_start": start, "wash_end": end, "setpoint_count": len(applied)}
+    if applied:
+        last = applied[-1]
+        summary.update(applied_concentration_pct=last["target_concentration_pct"],
+                       applied_temp_c=last["target_temp_c"],
+                       applied_wash_time_min=last["wash_time_min"])
+    stats = influx.summarize(start, end, config.SENSOR_INTERVAL_S) if start and end else None
+    if stats:
+        summary.update(stats)
+    else:
+        log.warning("배치 %s: 요약할 센서 데이터가 없습니다", batch_id)
+    db.save_summary(summary)
+    push({"type": "history"})
+    return summary
+
+
+@app.post("/api/batches/{batch_id}/summary")
+def recompute_summary(batch_id: str):
+    """종료된 배치의 요약을 다시 계산 (InfluxDB에 데이터가 남아 있을 때만 가능)"""
+    b = get_batch_or_404(batch_id)
+    if b["status"] != "종료":
+        raise HTTPException(status_code=409, detail=["종료된 배치만 요약할 수 있습니다"])
+    return summarize_batch(batch_id)
+
+
+# ---------------- 이력·CSV ----------------
+
+HISTORY_COLUMNS = [  # (키, CSV 머리글)
+    ("batch_id", "배치"), ("note", "메모"), ("started_at", "시작"), ("ended_at", "종료"),
+    ("contaminated_n", "오염 판정 수"), ("clean_n", "비오염 판정 수"), ("ratio_pct", "오염 비율(%)"),
+    ("suggested_grade", "제안 등급"), ("final_grade", "확정 등급"),
+    ("applied_concentration_pct", "적용 농도(%)"), ("applied_temp_c", "적용 온도(°C)"),
+    ("applied_wash_time_min", "적용 세척 시간(분)"), ("setpoint_count", "목표값 적용 횟수"),
+    ("avg_concentration_pct", "평균 농도(%)"), ("avg_temp_c", "평균 온도(°C)"),
+    ("avg_turbidity_ntu", "평균 탁도(NTU)"), ("max_turbidity_ntu", "최대 탁도(NTU)"),
+    ("pump_on_s", "약품 투입 시간(초)"), ("heater_on_s", "히터 가동 시간(초)"), ("samples", "센서 측정 수"),
+]
+
+
+def history_rows() -> list[dict]:
+    rows = []
+    for r in db.history():
+        total = r["contaminated_n"] + r["clean_n"]
+        r["ratio_pct"] = round(r["contaminated_n"] / total * 100, 1) if total else None
+        rows.append(r)
+    return rows
+
+
+@app.get("/api/history")
+def get_history():
+    return history_rows()
+
+
+@app.get("/api/history.csv")
+def get_history_csv():
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([title for _, title in HISTORY_COLUMNS])
+    for r in history_rows():
+        writer.writerow(["" if r.get(k) is None else r.get(k) for k, _ in HISTORY_COLUMNS])
+    # utf-8-sig: 엑셀에서 열었을 때 한글이 깨지지 않도록 BOM을 붙인다
+    filename = f"petwash_history_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    return Response(buf.getvalue().encode("utf-8-sig"), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ---------------- 설정 (레시피·임계값) ----------------
+
+class GradeRecipe(BaseModel):
+    name: str = Field(min_length=1)
+    concentration_pct: float
+    temp_c: float
+    wash_time_min: float
+    expected_decay_pct_per_min: float = Field(gt=0)
+
+
+class SettingsIn(BaseModel):
+    grades: dict[int, GradeRecipe]
+    grade_thresholds_pct: list[float]
+    tolerance: dict[str, float]
+    turbidity_limit_ntu: float = Field(gt=0)
+    decay_alert_factor: float = Field(gt=1)
+
+
+@app.get("/api/settings")
+def get_settings():
+    return config.load_recipes()
+
+
+@app.put("/api/settings")
+def put_settings(body: SettingsIn):
+    current = config.load_recipes()
+    errors = []
+    if sorted(body.grades) != [0, 1, 2, 3]:
+        errors.append("등급 0~3의 레시피가 모두 있어야 합니다")
+    for g, r in body.grades.items():
+        # 레시피도 안전 한계 안이어야 한다 (안전 한계 자체는 장치와 맞춰야 하므로 화면에서 바꾸지 않음)
+        errors += [f"등급 {g}: {e}" for e in
+                   config.check_setpoint(r.concentration_pct, r.temp_c, r.wash_time_min, current["safety"])]
+    t = body.grade_thresholds_pct
+    if len(t) != 3 or not (0 < t[0] < t[1] < t[2] < 100):
+        errors.append("등급 기준은 0 < 기준1 < 기준2 < 기준3 < 100 이어야 합니다")
+    if set(body.tolerance) != {"concentration_pct", "temp_c"} or min(body.tolerance.values()) <= 0:
+        errors.append("허용오차(농도·온도)는 0보다 커야 합니다")
+    if errors:
+        raise HTTPException(status_code=400, detail=errors)
+
+    data = body.model_dump()
+    data["grades"] = {g: data["grades"][g] for g in sorted(data["grades"])}
+    data["safety"] = current["safety"]
+    config.save_recipes(data)
+    log.info("설정 저장됨")
+    # 등급 제안·추천을 새 설정으로 다시 계산하고 브라우저에 알린다
+    with batch_lock:
+        if state["batch"]:
+            set_current_batch(db.get_batch(state["batch"]["batch_id"]))
+    update_recommendation()
+    push({"type": "recipes", "data": config.load_recipes()})
+    return config.load_recipes()
 
 
 @app.websocket("/ws")

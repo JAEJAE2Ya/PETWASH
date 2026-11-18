@@ -85,6 +85,14 @@ button.danger { color: var(--bad); border-color: #f5c2c0; }
 .rec-list .act { font-weight: bold; }
 .rec-list .why { font-size: 13px; color: var(--muted); margin-top: 2px; }
 
+a.button { display: inline-block; text-decoration: none; border-radius: 6px; padding: 8px 18px; }
+a.button.primary { background: var(--accent); color: #fff; }
+.form-table input { width: 90px; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; }
+.form-table input.name { width: 80px; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 16px; }
+.form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.form-grid input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); }
+
 .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
 .chart-box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; height: 280px; display: flex; flex-direction: column; }
 .chart-box h3 { margin: 0 0 6px; font-size: 14px; }

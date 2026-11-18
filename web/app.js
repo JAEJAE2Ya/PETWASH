@@ -411,6 +411,83 @@ $("btn-water").onclick = () => {
     api("POST", "/api/device/replace_water", null, "rec-error");
 };
 
+// ---------------- 이력 ----------------
+function fmtDuration(s) {
+  if (s == null) return "-";
+  const m = Math.floor(s / 60);
+  return `${m}분 ${Math.round(s % 60)}초`;
+}
+
+async function loadBatchHistory() {
+  const rows = await (await fetch("/api/history")).json();
+  const n = (x, d, unit = "") => (x == null ? "-" : Number(x).toFixed(d) + unit);
+  $("history-list").innerHTML = rows.length === 0
+    ? `<tr><td colspan="11">종료된 배치가 없습니다</td></tr>`
+    : rows.map((r) => `<tr>
+        <td>${r.batch_id}${r.note ? `<div class="hint" style="margin:0">${r.note}</div>` : ""}</td>
+        <td>${fmtTime(r.ended_at)}</td>
+        <td>${r.ratio_pct == null ? "-" : r.ratio_pct + "%"} <span class="hint">(${r.contaminated_n}/${r.contaminated_n + r.clean_n})</span></td>
+        <td>${r.suggested_grade ?? "-"} → <b>${r.final_grade ?? "-"}</b></td>
+        <td>${r.applied_concentration_pct == null ? "적용 없음"
+          : `${r.applied_concentration_pct}% · ${r.applied_temp_c}°C · ${r.applied_wash_time_min}분`}</td>
+        <td>${n(r.avg_concentration_pct, 2, "%")}</td>
+        <td>${n(r.avg_temp_c, 1, "°C")}</td>
+        <td>${n(r.avg_turbidity_ntu, 1)} / ${n(r.max_turbidity_ntu, 1)}</td>
+        <td>${fmtDuration(r.pump_on_s)}</td>
+        <td>${fmtDuration(r.heater_on_s)}</td>
+        <td>${r.samples == null ? `<button data-sum="${r.batch_id}">요약 계산</button>` : ""}</td>
+      </tr>`).join("");
+  $("history-list").querySelectorAll("[data-sum]").forEach((b) =>
+    (b.onclick = async () => { await api("POST", `/api/batches/${b.dataset.sum}/summary`); loadBatchHistory(); }));
+}
+
+// ---------------- 설정 ----------------
+function fillSettings(r) {
+  $("set-grades").innerHTML = Object.entries(r.grades).map(([g, x]) => `<tr data-grade="${g}">
+      <td>${g}</td>
+      <td><input class="name" data-k="name" value="${x.name}"></td>
+      <td><input type="number" step="0.1" data-k="concentration_pct" value="${x.concentration_pct}"></td>
+      <td><input type="number" step="1" data-k="temp_c" value="${x.temp_c}"></td>
+      <td><input type="number" step="1" data-k="wash_time_min" value="${x.wash_time_min}"></td>
+      <td><input type="number" step="0.01" data-k="expected_decay_pct_per_min" value="${x.expected_decay_pct_per_min}"></td>
+    </tr>`).join("");
+  [$("set-t0").value, $("set-t1").value, $("set-t2").value] = r.grade_thresholds_pct;
+  $("set-tol-c").value = r.tolerance.concentration_pct;
+  $("set-tol-t").value = r.tolerance.temp_c;
+  $("set-turb").value = r.turbidity_limit_ntu;
+  $("set-decay").value = r.decay_alert_factor;
+  const s = r.safety;
+  $("set-safety").textContent = `농도 ${s.concentration_pct[0]}~${s.concentration_pct[1]}% · ` +
+    `온도 ${s.temp_c[0]}~${s.temp_c[1]}°C · 세척 시간 ${s.wash_time_min[0]}~${s.wash_time_min[1]}분`;
+}
+
+function readSettings() {
+  const grades = {};
+  document.querySelectorAll("#set-grades tr").forEach((tr) => {
+    const g = {};
+    tr.querySelectorAll("input").forEach((i) => (g[i.dataset.k] = i.dataset.k === "name" ? i.value.trim() : Number(i.value)));
+    grades[tr.dataset.grade] = g;
+  });
+  return {
+    grades,
+    grade_thresholds_pct: [Number($("set-t0").value), Number($("set-t1").value), Number($("set-t2").value)],
+    tolerance: { concentration_pct: Number($("set-tol-c").value), temp_c: Number($("set-tol-t").value) },
+    turbidity_limit_ntu: Number($("set-turb").value),
+    decay_alert_factor: Number($("set-decay").value),
+  };
+}
+
+$("btn-save-settings").onclick = async () => {
+  $("settings-msg").textContent = "";
+  const r = await api("PUT", "/api/settings", readSettings(), "settings-error");
+  if (r) $("settings-msg").textContent = "저장했습니다. 등급 제안과 추천에 바로 반영됩니다.";
+};
+$("btn-reset-settings").onclick = () => {
+  $("settings-error").textContent = "";
+  $("settings-msg").textContent = "";
+  if (app.recipes) fillSettings(app.recipes);
+};
+
 function renderAll() {
   renderSensor();
   renderRecommendation();
@@ -457,6 +534,16 @@ function connect() {
         app.recommendation = msg.data.recommendation;
         loadBatches();
         loadDecisions();
+        loadBatchHistory();
+        fillSettings(app.recipes);
+        break;
+      case "history":
+        loadBatchHistory();
+        break;
+      case "recipes":
+        app.recipes = msg.data;
+        slidersReady = false; // 등급 버튼·슬라이더를 새 레시피로 다시 만든다
+        fillSettings(app.recipes);
         break;
       case "recommendation":
         app.recommendation = msg.data;

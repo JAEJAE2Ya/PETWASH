@@ -23,6 +23,7 @@ TOPIC_STATUS = "petwash/device/status"
 TOPIC_BATCH = "petwash/control/batch"  # 서버→장치: 배치 시작/종료 알림 (추가 토픽)
 
 HEARTBEAT_TIMEOUT_S = 15  # 이 시간 이상 하트비트가 없으면 "장치 연결 끊김"
+SENSOR_INTERVAL_S = 2     # 장치가 센서 값을 보내는 간격 (가동 시간 계산에 사용)
 
 
 def load_recipes() -> dict:
@@ -35,6 +36,10 @@ def load_recipes() -> dict:
 
 def save_recipes(data: dict) -> None:
     with open(RECIPES_PATH, "w", encoding="utf-8") as f:
+        f.write("# 등급별 세척 레시피와 임계값 (웹 설정 화면에서 저장하면 이 파일이 다시 써집니다)\n"
+                "# expected_decay_pct_per_min: 세척 중 약품 농도가 분당 줄어드는 기대 속도(%p/분)\n"
+                "# grade_thresholds_pct: 오염 비율(%) 기준 [등급1 시작, 등급2 시작, 등급3 시작]\n"
+                "# safety: 안전 한계 (장치 코드 device/controller.py 와 같은 값이어야 함)\n")
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
 
 

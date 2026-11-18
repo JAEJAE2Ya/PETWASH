@@ -121,8 +121,62 @@
         </div>
       </div>
     </section>
-    <section id="tab-history" class="page"><p class="todo">5단계에서 만들 화면입니다.</p></section>
-    <section id="tab-settings" class="page"><p class="todo">5단계에서 만들 화면입니다.</p></section>
+    <!-- 이력 -->
+    <section id="tab-history" class="page">
+      <div class="panel">
+        <h2>배치 이력</h2>
+        <p class="hint">배치를 종료할 때 세척 구간(첫 목표값 적용 ~ 종료)의 센서 값을 요약해 저장합니다.
+          약품 투입 시간 = 펌프가 켜져 있던 측정 수 × 2초.</p>
+        <div class="btn-row" style="margin:0 0 12px"><a class="button primary" href="/api/history.csv">CSV 내보내기</a></div>
+        <div class="table-wrap">
+          <table class="list">
+            <thead><tr>
+              <th>배치</th><th>종료</th><th>오염 비율</th><th>등급(제안→확정)</th>
+              <th>적용 조건</th><th>평균 농도</th><th>평균 온도</th><th>탁도 평균/최대</th>
+              <th>약품 투입</th><th>히터 가동</th><th></th>
+            </tr></thead>
+            <tbody id="history-list"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 설정 -->
+    <section id="tab-settings" class="page">
+      <div class="panel">
+        <h2>등급별 레시피</h2>
+        <div class="table-wrap">
+          <table class="list form-table">
+            <thead><tr><th>등급</th><th>이름</th><th>약품 농도(%)</th><th>온도(°C)</th><th>세척 시간(분)</th><th>기대 농도 감소(%p/분)</th></tr></thead>
+            <tbody id="set-grades"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>임계값</h2>
+        <div class="form-grid">
+          <label>등급 1 시작 오염 비율(%)<input type="number" step="1" id="set-t0"></label>
+          <label>등급 2 시작 오염 비율(%)<input type="number" step="1" id="set-t1"></label>
+          <label>등급 3 시작 오염 비율(%)<input type="number" step="1" id="set-t2"></label>
+          <label>농도 허용오차(%p)<input type="number" step="0.05" id="set-tol-c"></label>
+          <label>온도 허용오차(°C)<input type="number" step="0.5" id="set-tol-t"></label>
+          <label>세척수 교체 탁도(NTU)<input type="number" step="1" id="set-turb"></label>
+          <label>등급 상향 검토 배수(기대 감소 속도의 몇 배)<input type="number" step="0.1" id="set-decay"></label>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>안전 한계 (읽기 전용)</h2>
+        <p class="hint" id="set-safety"></p>
+        <p class="hint">안전 한계는 장치 코드(device/controller.py)에도 같은 값이 들어 있어서 화면에서 바꾸지 않습니다.
+          바꾸려면 config/recipes.yaml과 장치 코드를 함께 수정하세요.</p>
+      </div>
+      <div class="btn-row">
+        <button id="btn-save-settings" class="primary">설정 저장</button>
+        <button id="btn-reset-settings">되돌리기</button>
+      </div>
+      <div id="settings-msg" class="hint" style="margin-top:8px"></div>
+      <div id="settings-error" class="error"></div>
+    </section>
   </main>
 
   <script src="app.js"></script>

@@ -79,3 +79,27 @@ class InfluxStore:
                 t = t.replace(tzinfo=timezone.utc)
             r["ts"] = t.isoformat()
         return rows
+
+    def summarize(self, start_iso: str, end_iso: str, interval_s: float) -> dict | None:
+        """기간 동안의 센서 평균·최대값과 펌프·히터 가동 시간(측정 개수 × 측정 간격)을 계산"""
+        sql = (
+            "SELECT COUNT(*) AS samples, AVG(concentration_pct) AS avg_concentration_pct, "
+            "AVG(temp_c) AS avg_temp_c, AVG(turbidity_ntu) AS avg_turbidity_ntu, "
+            "MAX(turbidity_ntu) AS max_turbidity_ntu, "
+            "SUM(CASE WHEN pump_on THEN 1 ELSE 0 END) AS pump_n, "
+            "SUM(CASE WHEN heater_on THEN 1 ELSE 0 END) AS heater_n "
+            f"FROM wash_sensor WHERE time >= '{start_iso}' AND time <= '{end_iso}'"
+        )
+        rows = self.query(sql)
+        if not rows or not rows[0]["samples"]:
+            return None
+        r = rows[0]
+        return {
+            "samples": r["samples"],
+            "avg_concentration_pct": round(r["avg_concentration_pct"], 3),
+            "avg_temp_c": round(r["avg_temp_c"], 2),
+            "avg_turbidity_ntu": round(r["avg_turbidity_ntu"], 2),
+            "max_turbidity_ntu": round(r["max_turbidity_ntu"], 2),
+            "pump_on_s": r["pump_n"] * interval_s,
+            "heater_on_s": r["heater_n"] * interval_s,
+        }
