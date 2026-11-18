@@ -1,4 +1,4 @@
-// 폐페트병 세척 공정 관리 - 프론트엔드 (바닐라 JS + Chart.js)
+// PETWASH - 프론트엔드 (바닐라 JS + Chart.js)
 
 const MAX_POINTS = 300; // 그래프에 남길 점 개수 (2초 간격 → 약 10분)
 const $ = (id) => document.getElementById(id);
@@ -45,11 +45,11 @@ tickClock();
 setInterval(tickClock, 1000);
 
 // ---------------- 그래프 ----------------
-// 바이오스 화면에 맞춘 그래프 기본값: 픽셀 글꼴, 회색 글자, 흐린 격자
+// 화면에 맞춘 그래프 기본값: 픽셀 글꼴, 진회색 글자, 흐린 격자
 Chart.defaults.font.family = "Galmuri11, DotumChe, monospace";
 Chart.defaults.font.size = 12;
-Chart.defaults.color = "#aaaaaa";
-Chart.defaults.borderColor = "rgba(170, 170, 170, 0.18)";
+Chart.defaults.color = "#444444";
+Chart.defaults.borderColor = "rgba(0, 0, 0, 0.1)";
 
 function makeChart(canvasId, color) {
   return new Chart($(canvasId), {
@@ -59,7 +59,7 @@ function makeChart(canvasId, color) {
       datasets: [
         { label: "측정값", data: [], borderColor: color, backgroundColor: color,
           borderWidth: 2, pointRadius: 0, tension: 0 },
-        { label: "목표", data: [], borderColor: "#ffffff", backgroundColor: "#ffffff", borderDash: [4, 4],
+        { label: "목표", data: [], borderColor: "#000000", backgroundColor: "#000000", borderDash: [4, 4],
           borderWidth: 1, pointRadius: 0, spanGaps: true },
       ],
     },
@@ -70,7 +70,7 @@ function makeChart(canvasId, color) {
       scales: { x: { ticks: { maxTicksLimit: 4, autoSkip: true, maxRotation: 0 } } },
       plugins: {
         legend: { position: "bottom", labels: { boxWidth: 12, boxHeight: 2 } },
-        tooltip: { backgroundColor: "#aaaaaa", titleColor: "#0000aa", bodyColor: "#0000aa",
+        tooltip: { backgroundColor: "#0000aa", titleColor: "#ffffff", bodyColor: "#ffffff",
                    cornerRadius: 0, borderColor: "#ffffff", borderWidth: 1 },
       },
     },
@@ -78,9 +78,9 @@ function makeChart(canvasId, color) {
 }
 
 const charts = {
-  conc: makeChart("c-conc", "#ffff55"), // 노랑
-  temp: makeChart("c-temp", "#ff5555"), // 빨강
-  turb: makeChart("c-turb", "#55ffff"), // 하늘
+  conc: makeChart("c-conc", "#0000aa"), // 파랑
+  temp: makeChart("c-temp", "#c40000"), // 빨강
+  turb: makeChart("c-turb", "#a85a00"), // 갈색
 };
 
 function timeLabel(iso) {

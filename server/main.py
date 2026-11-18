@@ -234,7 +234,7 @@ async def lifespan(app: FastAPI):
     mqtt_bridge.stop()
 
 
-app = FastAPI(title="폐페트병 세척 공정 관리", lifespan=lifespan)
+app = FastAPI(title="PETWASH", lifespan=lifespan)
 
 
 def snapshot() -> dict:
