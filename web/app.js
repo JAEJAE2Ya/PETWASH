@@ -589,9 +589,6 @@ function renderSpeed() {
   const fast = currentSpeed() > 1;
   $("btn-speed").textContent = fast ? "실제 시간으로 되돌리기" : "(테스트) 10배 가속";
   $("btn-speed").classList.toggle("on", fast);
-  $("speed-text").textContent = fast
-    ? "시뮬레이터 시간이 10배 빠르게 흐르는 중입니다. 세척 12분 → 약 72초. 실제 공정 시간이 아닙니다."
-    : "실제 시간으로 동작 중 (세척 12분 = 실제 12분). 시연할 때는 10배 가속을 켜세요.";
   $("speed-badge").hidden = !fast;
 }
 
