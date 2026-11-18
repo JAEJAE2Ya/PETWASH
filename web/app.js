@@ -14,15 +14,43 @@ const app = {
 };
 
 // ---------------- 탭 전환 ----------------
-document.querySelectorAll(".tab").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
-    document.querySelectorAll(".page").forEach((p) =>
-      p.classList.toggle("active", p.id === "tab-" + btn.dataset.tab));
-  });
+const tabs = [...document.querySelectorAll(".tab")];
+function showTab(btn) {
+  tabs.forEach((b) => b.classList.toggle("active", b === btn));
+  document.querySelectorAll(".page").forEach((p) =>
+    p.classList.toggle("active", p.id === "tab-" + btn.dataset.tab));
+}
+tabs.forEach((btn) => btn.addEventListener("click", () => showTab(btn)));
+
+// 바이오스처럼 숫자키 1~5로 화면 이동 (입력칸에 글자를 치는 중에는 동작하지 않음)
+document.addEventListener("keydown", (e) => {
+  const typing = ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)
+    && document.activeElement.type !== "range";
+  if (typing || e.ctrlKey || e.altKey || e.metaKey) return;
+  const n = Number(e.key);
+  if (n >= 1 && n <= tabs.length) {
+    showTab(tabs[n - 1]);
+    window.scrollTo(0, 0);
+  }
 });
 
+// 제목 줄 시계
+function tickClock() {
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  $("clock").textContent = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+    `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+}
+tickClock();
+setInterval(tickClock, 1000);
+
 // ---------------- 그래프 ----------------
+// 바이오스 화면에 맞춘 그래프 기본값: 픽셀 글꼴, 회색 글자, 흐린 격자
+Chart.defaults.font.family = "Galmuri11, DotumChe, monospace";
+Chart.defaults.font.size = 12;
+Chart.defaults.color = "#aaaaaa";
+Chart.defaults.borderColor = "rgba(170, 170, 170, 0.18)";
+
 function makeChart(canvasId, color) {
   return new Chart($(canvasId), {
     type: "line",
@@ -30,25 +58,29 @@ function makeChart(canvasId, color) {
       labels: [],
       datasets: [
         { label: "측정값", data: [], borderColor: color, backgroundColor: color,
-          borderWidth: 2, pointRadius: 0, tension: 0.2 },
-        { label: "목표", data: [], borderColor: "#888", borderDash: [6, 4],
-          borderWidth: 1.5, pointRadius: 0, spanGaps: true },
+          borderWidth: 2, pointRadius: 0, tension: 0 },
+        { label: "목표", data: [], borderColor: "#ffffff", backgroundColor: "#ffffff", borderDash: [4, 4],
+          borderWidth: 1, pointRadius: 0, spanGaps: true },
       ],
     },
     options: {
       animation: false,
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
-      scales: { x: { ticks: { maxTicksLimit: 6, autoSkip: true } } },
-      plugins: { legend: { position: "bottom", labels: { boxWidth: 12 } } },
+      scales: { x: { ticks: { maxTicksLimit: 4, autoSkip: true, maxRotation: 0 } } },
+      plugins: {
+        legend: { position: "bottom", labels: { boxWidth: 12, boxHeight: 2 } },
+        tooltip: { backgroundColor: "#aaaaaa", titleColor: "#0000aa", bodyColor: "#0000aa",
+                   cornerRadius: 0, borderColor: "#ffffff", borderWidth: 1 },
+      },
     },
   });
 }
 
 const charts = {
-  conc: makeChart("c-conc", "#1f6feb"),
-  temp: makeChart("c-temp", "#d9480f"),
-  turb: makeChart("c-turb", "#7048e8"),
+  conc: makeChart("c-conc", "#ffff55"), // 노랑
+  temp: makeChart("c-temp", "#ff5555"), // 빨강
+  turb: makeChart("c-turb", "#55ffff"), // 하늘
 };
 
 function timeLabel(iso) {
