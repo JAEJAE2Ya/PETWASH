@@ -6,11 +6,14 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Literal
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-from . import config
+from . import config, db
 from .influx import InfluxStore
 from .mqtt_bridge import MqttBridge
 
@@ -37,6 +40,7 @@ state = {
     "sensor": None,         # 마지막 센서 값
     "device_status": None,  # 마지막 장치 상태(하트비트)
     "device_online": False,
+    "last_setpoint": None,  # 마지막으로 보낸 목표값 + 장치 적용 결과
 }
 last_heartbeat = 0.0
 
@@ -63,7 +67,26 @@ def on_mqtt_message(topic: str, payload: dict):
     elif topic == config.TOPIC_STATUS:
         last_heartbeat = time.time()
         state["device_status"] = payload
+        check_setpoint_result(payload)
         push({"type": "device_status", "data": payload})
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def check_setpoint_result(status: dict):
+    """장치 상태 회신을 보고 마지막 목표값이 적용됐는지/거부됐는지 기록"""
+    sp = state["last_setpoint"]
+    cmd = status.get("last_command")
+    if not sp or sp["result"] != "전송됨" or not cmd or cmd.get("issued_at") != sp["issued_at"]:
+        return
+    sp["result"] = "적용됨" if cmd["accepted"] else "거부됨"
+    sp["result_at"] = status.get("ts")
+    sp["result_message"] = cmd.get("message", "")
+    db.update_setpoint_result(sp["issued_at"], sp["result"], sp["result_at"], sp["result_message"])
+    log.info("목표값 %s: %s", sp["result"], sp["result_message"])
+    push({"type": "setpoint", "data": sp})
 
 
 async def watch_heartbeat():
@@ -89,6 +112,9 @@ mqtt_bridge = MqttBridge(on_mqtt_message)
 async def lifespan(app: FastAPI):
     global loop
     loop = asyncio.get_running_loop()
+    db.init_db()
+    recent = db.recent_setpoints(1)
+    state["last_setpoint"] = recent[0] if recent else None
     mqtt_bridge.start()
     task = asyncio.create_task(watch_heartbeat())
     yield
@@ -116,6 +142,45 @@ def get_state():
 @app.get("/api/sensor/history")
 def sensor_history(minutes: int = 10):
     return influx.recent_sensor(minutes)
+
+
+class SetpointIn(BaseModel):
+    batch_id: str | None = None
+    target_concentration_pct: float
+    target_temp_c: float
+    wash_time_min: float
+    issued_by: Literal["operator", "auto"] = "operator"
+
+
+def send_setpoint(sp_in: SetpointIn) -> dict:
+    """안전 한계를 검사한 뒤 MQTT로 목표값을 장치에 보낸다"""
+    recipes = config.load_recipes()
+    errors = config.check_setpoint(
+        sp_in.target_concentration_pct, sp_in.target_temp_c, sp_in.wash_time_min, recipes["safety"]
+    )
+    if errors:
+        raise HTTPException(status_code=400, detail=errors)
+    if not mqtt_bridge.connected:
+        raise HTTPException(status_code=503, detail=["MQTT 브로커에 연결되지 않아 보낼 수 없습니다"])
+
+    sp = sp_in.model_dump()
+    sp["batch_id"] = sp["batch_id"] or "TEST"
+    sp["issued_at"] = now_iso()  # 장치가 회신할 때 이 값으로 어떤 명령인지 구분
+    mqtt_bridge.publish(config.TOPIC_SETPOINT, sp)
+    db.insert_setpoint(sp)
+    state["last_setpoint"] = {**sp, "result": "전송됨", "result_at": None, "result_message": ""}
+    push({"type": "setpoint", "data": state["last_setpoint"]})
+    return state["last_setpoint"]
+
+
+@app.post("/api/setpoint")
+def post_setpoint(sp: SetpointIn):
+    return send_setpoint(sp)
+
+
+@app.get("/api/setpoints")
+def get_setpoints(limit: int = 10):
+    return db.recent_setpoints(limit)
 
 
 @app.websocket("/ws")

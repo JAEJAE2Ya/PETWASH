@@ -105,6 +105,7 @@ class Simulator:
             "state": self.ctrl.state,
             "message": self.ctrl.message,
             "applied": sp,  # 현재 적용 중인 목표값 (없으면 null)
+            "last_command": self.ctrl.last_command,  # 마지막 명령의 적용/거부 결과
             "remaining_s": None if remain is None else round(remain),
             "pump_on": self.ctrl.pump_on,
             "heater_on": self.ctrl.heater_on,

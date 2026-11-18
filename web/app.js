@@ -150,10 +150,102 @@ function renderAlerts() {
   $("alerts").innerHTML = list.map(([cls, text]) => `<div class="alert ${cls}">${text}</div>`).join("");
 }
 
+// ---------------- 세척 제어: 수동 조절 ----------------
+const sliders = [
+  { key: "concentration_pct", el: "s-conc", out: "o-conc", digits: 1 },
+  { key: "temp_c", el: "s-temp", out: "o-temp", digits: 0 },
+  { key: "wash_time_min", el: "s-time", out: "o-time", digits: 0 },
+];
+let slidersReady = false;
+
+function setupSliders() {
+  if (!app.recipes || slidersReady) return;
+  const safety = app.recipes.safety;
+  for (const s of sliders) {
+    const input = $(s.el);
+    [input.min, input.max] = safety[s.key];
+    input.oninput = () => ($(s.out).textContent = Number(input.value).toFixed(s.digits));
+  }
+  // 등급 레시피 버튼
+  $("preset-row").innerHTML = Object.entries(app.recipes.grades)
+    .map(([g, r]) => `<button data-grade="${g}">등급 ${g} (${r.name})</button>`).join("");
+  $("preset-row").querySelectorAll("button").forEach((b) => (b.onclick = () => fillSliders(app.recipes.grades[b.dataset.grade])));
+  fillSliders(app.recipes.grades[0]);
+  slidersReady = true;
+}
+
+function fillSliders(v) {
+  const values = { concentration_pct: v.concentration_pct, temp_c: v.temp_c, wash_time_min: v.wash_time_min };
+  for (const s of sliders) {
+    $(s.el).value = values[s.key];
+    $(s.out).textContent = Number(values[s.key]).toFixed(s.digits);
+  }
+}
+
+async function sendSetpoint(body) {
+  $("send-error").textContent = "";
+  const res = await fetch("/api/setpoint", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    $("send-error").textContent = "전송 실패: " + [].concat(err.detail).map((d) => d.msg || d).join(", ");
+    return null;
+  }
+  return res.json();
+}
+
+$("btn-send").onclick = () =>
+  sendSetpoint({
+    target_concentration_pct: Number($("s-conc").value),
+    target_temp_c: Number($("s-temp").value),
+    wash_time_min: Number($("s-time").value),
+    issued_by: "operator",
+  });
+
+function fmtTime(iso) {
+  return iso ? new Date(iso).toLocaleString("ko-KR", { hour12: false }) : "-";
+}
+
+function spRows(sp) {
+  return `<tr><th>배치</th><td>${sp.batch_id ?? "-"}</td></tr>
+    <tr><th>약품 농도</th><td>${sp.target_concentration_pct} %</td></tr>
+    <tr><th>온도</th><td>${sp.target_temp_c} °C</td></tr>
+    <tr><th>세척 시간</th><td>${sp.wash_time_min} 분</td></tr>
+    <tr><th>보낸 사람</th><td>${sp.issued_by === "auto" ? "자동" : "작업자"}</td></tr>
+    <tr><th>보낸 시각</th><td>${fmtTime(sp.issued_at)}</td></tr>`;
+}
+
+function renderControl() {
+  setupSliders();
+  const sp = app.lastSetpoint;
+  if (!sp) {
+    $("last-sp").innerHTML = `<tr><td>아직 보낸 목표값이 없습니다</td></tr>`;
+  } else {
+    const cls = { "적용됨": "st-ok", "거부됨": "st-bad", "전송됨": "st-wait" }[sp.result];
+    const label = sp.result === "전송됨" ? "전송됨 · 장치 응답 대기 중" : sp.result;
+    $("last-sp").innerHTML = spRows(sp) +
+      `<tr><th>장치 적용 여부</th><td class="${cls}">${label}</td></tr>` +
+      (sp.result_at ? `<tr><th>응답 시각</th><td>${fmtTime(sp.result_at)}</td></tr>` : "") +
+      (sp.result_message ? `<tr><th>장치 메시지</th><td>${sp.result_message}</td></tr>` : "");
+  }
+  const st = app.deviceStatus;
+  if (!app.deviceOnline) {
+    $("applied-sp").innerHTML = `<tr><td class="st-bad">장치 연결 끊김</td></tr>`;
+  } else if (!st || !st.applied) {
+    $("applied-sp").innerHTML = `<tr><td>적용 중인 목표값 없음 (${st ? st.state : "-"})</td></tr>`;
+  } else {
+    $("applied-sp").innerHTML = spRows(st.applied) + `<tr><th>장치 상태</th><td>${st.state}</td></tr>`;
+  }
+}
+
 function renderAll() {
   renderSensor();
   renderDevice();
   renderAlerts();
+  renderControl();
 }
 
 // ---------------- WebSocket ----------------
@@ -182,6 +274,10 @@ function connect() {
         app.deviceOnline = msg.data.device_online;
         app.mqttConnected = msg.data.mqtt_connected;
         app.influxError = msg.data.influx_error;
+        app.lastSetpoint = msg.data.last_setpoint;
+        break;
+      case "setpoint":
+        app.lastSetpoint = msg.data;
         break;
       case "sensor":
         app.sensor = msg.data;

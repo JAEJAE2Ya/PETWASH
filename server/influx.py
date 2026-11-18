@@ -1,7 +1,7 @@
 """InfluxDB 3 Core 저장·조회 (시계열: 센서 값, 카메라 판정)"""
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from influxdb_client_3 import InfluxDBClient3, Point
 
@@ -71,5 +71,8 @@ class InfluxStore:
         )
         rows = self.query(sql)
         for r in rows:
-            r["ts"] = r.pop("time").isoformat()
+            t = r.pop("time")
+            if t.tzinfo is None:  # InfluxDB는 UTC 시간을 시간대 정보 없이 돌려준다
+                t = t.replace(tzinfo=timezone.utc)
+            r["ts"] = t.isoformat()
         return rows

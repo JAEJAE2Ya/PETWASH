@@ -25,8 +25,17 @@ class LocalController:
         self.message = "목표값을 기다리는 중"
         self.pump_on = False
         self.heater_on = False
+        # 마지막으로 받은 명령의 처리 결과 (서버가 적용/거부 여부를 확인하는 데 사용)
+        self.last_command = None
 
     def apply_setpoint(self, sp: dict) -> bool:
+        ok = self._apply(sp)
+        if not ok and self.setpoint is not None:
+            self.message += " → 이전 목표값 유지"
+        self.last_command = {"issued_at": sp.get("issued_at"), "accepted": ok, "message": self.message}
+        return ok
+
+    def _apply(self, sp: dict) -> bool:
         """목표값을 검사해서 통과하면 적용. 범위 밖이면 거부하고 이전 목표값 유지"""
         try:
             values = {
