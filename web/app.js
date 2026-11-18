@@ -331,7 +331,7 @@ function renderBatch() {
   if (id !== renderedBatchId) {
     renderedBatchId = id;
     if (!b) {
-      box.innerHTML = `<p class="hint">진행 중인 배치가 없습니다. 아래에서 새 배치를 만들고 "시작"을 누르세요.</p>`;
+      box.innerHTML = `<p class="hint">진행 중인 배치가 없습니다.</p>`;
     } else {
       const options = [0, 1, 2, 3].map((g) => `<option value="${g}">등급 ${gradeName(g)}</option>`).join("");
       box.innerHTML = `
@@ -571,7 +571,7 @@ function readSettings() {
 $("btn-save-settings").onclick = async () => {
   $("settings-msg").textContent = "";
   const r = await api("PUT", "/api/settings", readSettings(), "settings-error");
-  if (r) $("settings-msg").textContent = "저장했습니다. 등급 제안과 추천에 바로 반영됩니다.";
+  if (r) $("settings-msg").textContent = "저장했습니다.";
 };
 $("btn-reset-settings").onclick = () => {
   $("settings-error").textContent = "";

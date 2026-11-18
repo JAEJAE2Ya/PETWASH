@@ -88,13 +88,11 @@
           <button id="btn-water">세척수 교체 지시</button>
         </div>
         <div id="rec-error" class="error"></div>
-        <p class="hint">추천은 자동으로 적용되지 않습니다. 승인하거나, 아래 수동 조절에서 값을 바꿔 전송하세요.</p>
       </div>
 
       <div class="two-col">
         <div class="panel">
           <h2>수동 조절</h2>
-          <p class="hint">슬라이더 범위는 안전 한계입니다. 등급 버튼을 누르면 해당 레시피 값이 채워집니다.</p>
           <div class="preset-row" id="preset-row"></div>
           <div class="slider-row">
             <label for="s-conc">약품 농도</label>
@@ -137,8 +135,6 @@
     <section id="tab-history" class="page">
       <div class="panel">
         <h2>배치 이력</h2>
-        <p class="hint">배치를 종료할 때 세척 구간(첫 목표값 적용 ~ 종료)의 센서 값을 요약해 저장합니다.
-          약품 투입 시간 = 펌프가 켜져 있던 측정 수 × 2초.</p>
         <div class="btn-row" style="margin:0 0 12px"><a class="button primary" href="/api/history.csv">CSV 내보내기</a></div>
         <div class="table-wrap">
           <table class="list">
@@ -179,8 +175,6 @@
       <div class="panel">
         <h2>안전 한계 (읽기 전용)</h2>
         <p class="hint" id="set-safety"></p>
-        <p class="hint">안전 한계는 장치 코드(device/controller.py)에도 같은 값이 들어 있어서 화면에서 바꾸지 않습니다.
-          바꾸려면 config/recipes.yaml과 장치 코드를 함께 수정하세요.</p>
       </div>
       <div class="btn-row">
         <button id="btn-save-settings" class="primary">설정 저장</button>
