@@ -77,6 +77,14 @@ table.list th { color: var(--muted); font-weight: normal; }
 .btn-row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
 button.danger { color: var(--bad); border-color: #f5c2c0; }
 
+.rec-list { list-style: none; padding: 0; margin: 0; }
+.rec-list li { border-left: 4px solid var(--line); padding: 6px 10px; margin-bottom: 6px; background: #fafbfc; border-radius: 0 6px 6px 0; }
+.rec-list li.ok { border-color: var(--ok); }
+.rec-list li.warn { border-color: var(--warn); }
+.rec-list li.alert { border-color: var(--bad); }
+.rec-list .act { font-weight: bold; }
+.rec-list .why { font-size: 13px; color: var(--muted); margin-top: 2px; }
+
 .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
 .chart-box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; height: 280px; display: flex; flex-direction: column; }
 .chart-box h3 { margin: 0 0 6px; font-size: 14px; }

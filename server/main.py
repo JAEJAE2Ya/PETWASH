@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from . import config, db
 from .influx import InfluxStore
 from .mqtt_bridge import MqttBridge
+from .recommend import DecayTracker, recommend
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("server")
@@ -43,7 +44,9 @@ state = {
     "device_online": False,
     "last_setpoint": None,  # 마지막으로 보낸 목표값 + 장치 적용 결과
     "batch": None,          # 진행 중인 배치 (한 번에 1개)
+    "recommendation": None, # 현재 추천 조치
 }
+decay_tracker = DecayTracker()
 batch_lock = threading.Lock()  # 카메라 집계(MQTT 스레드)와 웹 요청이 동시에 배치를 바꾸지 않도록
 last_heartbeat = 0.0
 
@@ -64,6 +67,8 @@ def on_mqtt_message(topic: str, payload: dict):
         state["sensor"] = payload
         influx.write_sensor(payload)
         push({"type": "sensor", "data": payload})
+        track_decay(payload)
+        update_recommendation()
     elif topic == config.TOPIC_CAMERA:
         influx.write_camera(payload)
         count_camera_result(payload)
@@ -112,6 +117,9 @@ def batch_view(b: dict | None) -> dict | None:
 def set_current_batch(b: dict | None):
     state["batch"] = batch_view(b)
     push({"type": "batch", "data": state["batch"]})
+    if b is None:
+        decay_tracker.reset()
+    update_recommendation()
 
 
 def count_camera_result(msg: dict):
@@ -127,6 +135,53 @@ def count_camera_result(msg: dict):
                         suggested_grade=b["suggested_grade"])
         state["batch"] = b
     push({"type": "batch", "data": b})
+
+
+# ---------------- 추천 ----------------
+
+def track_decay(sensor: dict):
+    """장치가 현재 배치를 세척 중일 때만 농도 감소 속도 계산용 데이터를 모은다"""
+    b, st = state["batch"], state["device_status"]
+    if b and st and st.get("state") == "세척 중" and st.get("batch_id") == b["batch_id"]:
+        decay_tracker.add(b["batch_id"], time.time(), sensor["concentration_pct"], sensor["pump_on"])
+
+
+def compute_recommendation() -> dict:
+    b = state["batch"]
+    if b is None:
+        return {"available": False, "message": "진행 중인 배치가 없습니다."}
+    if b["final_grade"] is None:
+        hint = f" (시스템 제안 등급: {b['suggested_grade']})" if b["suggested_grade"] is not None else ""
+        return {"available": False, "message": "배치 관리 화면에서 등급을 먼저 확정하세요." + hint}
+    rec = recommend(b["final_grade"], config.load_recipes(), state["sensor"], decay_tracker.rate())
+    rec["batch_id"] = b["batch_id"]
+    return rec
+
+
+def update_recommendation():
+    state["recommendation"] = compute_recommendation()
+    push({"type": "recommendation", "data": state["recommendation"]})
+
+
+def log_decision(decision: str, applied: dict | None):
+    """추천에 대한 작업자 결정을 SQLite에 기록"""
+    rec = state["recommendation"] or {}
+    target = rec.get("target") or {}
+    needed = [i["action"] for i in rec.get("items", []) if i["level"] != "ok"]
+    db.insert_decision({
+        "ts": now_iso(),
+        "batch_id": state["batch"]["batch_id"] if state["batch"] else None,
+        "grade": rec.get("grade"),
+        "recommended": " / ".join(needed) if needed else "유지",
+        "proposed_concentration_pct": target.get("target_concentration_pct"),
+        "proposed_temp_c": target.get("target_temp_c"),
+        "proposed_wash_time_min": target.get("wash_time_min"),
+        "decision": decision,
+        "applied_concentration_pct": applied and applied["target_concentration_pct"],
+        "applied_temp_c": applied and applied["target_temp_c"],
+        "applied_wash_time_min": applied and applied["wash_time_min"],
+    })
+    push({"type": "decision"})
 
 
 async def watch_heartbeat():
@@ -156,6 +211,7 @@ async def lifespan(app: FastAPI):
     recent = db.recent_setpoints(1)
     state["last_setpoint"] = recent[0] if recent else None
     state["batch"] = batch_view(db.running_batch())  # 서버 재시작 시 진행 중 배치 복원
+    state["recommendation"] = compute_recommendation()
     mqtt_bridge.start()
     task = asyncio.create_task(watch_heartbeat())
     yield
@@ -217,7 +273,46 @@ def send_setpoint(sp_in: SetpointIn) -> dict:
 
 @app.post("/api/setpoint")
 def post_setpoint(sp: SetpointIn):
-    return send_setpoint(sp)
+    """작업자가 슬라이더로 값을 직접 정해서 보냄 (추천이 있으면 '수동 수정'으로 기록)"""
+    result = send_setpoint(sp)
+    if state["recommendation"] and state["recommendation"].get("available"):
+        log_decision("수동 수정", result)
+    return result
+
+
+@app.get("/api/recommendation")
+def get_recommendation():
+    return compute_recommendation()
+
+
+@app.post("/api/recommendation/approve")
+def approve_recommendation():
+    """추천 목표값(등급 레시피)을 승인해서 장치로 보낸다"""
+    rec = compute_recommendation()
+    if not rec.get("available"):
+        raise HTTPException(status_code=409, detail=[rec.get("message", "추천이 없습니다")])
+    state["recommendation"] = rec
+    result = send_setpoint(SetpointIn(batch_id=rec["batch_id"], issued_by="operator", **rec["target"]))
+    log_decision("추천 승인", result)
+    return result
+
+
+@app.post("/api/device/replace_water")
+def replace_water():
+    """세척수 교체 지시 (시뮬레이터는 농도·탁도·온도를 새 물 상태로 되돌림)"""
+    require_mqtt()
+    mqtt_bridge.publish(config.TOPIC_BATCH, {
+        "batch_id": state["batch"]["batch_id"] if state["batch"] else None,
+        "action": "replace_water", "ts": now_iso(),
+    })
+    decay_tracker.reset()  # 새 물이므로 감소 속도도 다시 계산
+    log_decision("세척수 교체 지시", None)
+    return {"ok": True}
+
+
+@app.get("/api/decisions")
+def get_decisions(limit: int = 10, batch_id: str | None = None):
+    return db.recent_decisions(limit, batch_id)
 
 
 @app.get("/api/setpoints")

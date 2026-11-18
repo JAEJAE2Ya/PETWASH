@@ -22,8 +22,9 @@ class InfluxStore:
             log.warning(self.last_error + " → InfluxDB 저장을 건너뜁니다")
             return
         # write_no_sync=True: InfluxDB 3가 디스크(WAL)에 기록할 때까지(약 1초) 기다리지 않고 바로 응답받는다.
-        # 기다리면 MQTT 메시지 처리가 1초에 1건으로 밀린다.
-        self.client = InfluxDBClient3(host=host, token=token, database=self.database, write_no_sync=True)
+        # 기다리면 MQTT 메시지 처리가 1초에 1건으로 밀린다. no_sync는 v3 쓰기 API에서만 되므로 v2 API를 끈다.
+        self.client = InfluxDBClient3(host=host, token=token, database=self.database,
+                                      write_no_sync=True, write_use_v2_api=False)
 
     def _write(self, point: Point):
         if self.client is None:

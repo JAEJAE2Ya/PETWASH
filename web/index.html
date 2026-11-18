@@ -67,7 +67,17 @@
     </section>
     <!-- 세척 제어 -->
     <section id="tab-control" class="page">
-      <div id="recommend-box" class="panel"><h2>추천 조치</h2><p class="todo">4단계에서 추가됩니다.</p></div>
+      <div class="panel">
+        <h2>추천 조치</h2>
+        <div id="rec-head" class="hint"></div>
+        <ul id="rec-items" class="rec-list"></ul>
+        <div class="btn-row">
+          <button id="btn-approve" class="primary">추천 승인 (레시피 목표값 전송)</button>
+          <button id="btn-water">세척수 교체 지시</button>
+        </div>
+        <div id="rec-error" class="error"></div>
+        <p class="hint">추천은 자동으로 적용되지 않습니다. 승인하거나, 아래 수동 조절에서 값을 바꿔 전송하세요.</p>
+      </div>
 
       <div class="two-col">
         <div class="panel">
@@ -89,7 +99,7 @@
             <input type="range" id="s-time" step="1">
             <span class="slider-val"><span id="o-time"></span> 분</span>
           </div>
-          <button id="btn-send" class="primary">목표값 전송</button>
+          <button id="btn-send" class="primary">이 값으로 전송 (수동)</button>
           <div id="send-error" class="error"></div>
         </div>
 
@@ -98,6 +108,16 @@
           <table class="kv" id="last-sp"></table>
           <h2 style="margin-top:18px">장치가 적용 중인 목표값</h2>
           <table class="kv" id="applied-sp"></table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>최근 결정 이력</h2>
+        <div class="table-wrap">
+          <table class="list">
+            <thead><tr><th>시각</th><th>배치</th><th>등급</th><th>당시 추천</th><th>결정</th><th>보낸 값 (농도/온도/시간)</th></tr></thead>
+            <tbody id="decision-list"></tbody>
+          </table>
         </div>
       </div>
     </section>

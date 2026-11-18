@@ -32,6 +32,21 @@ CREATE TABLE IF NOT EXISTS batches (
     final_grade INTEGER,              -- 작업자가 확정한 등급
     graded_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS decisions (    -- 추천에 대한 작업자 결정 이력
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    batch_id TEXT,
+    grade INTEGER,
+    recommended TEXT,                 -- 당시 추천 조치 요약 (조치가 필요한 항목만)
+    proposed_concentration_pct REAL,  -- 추천 목표값
+    proposed_temp_c REAL,
+    proposed_wash_time_min REAL,
+    decision TEXT NOT NULL,           -- 추천 승인 / 수동 수정 / 세척수 교체 지시
+    applied_concentration_pct REAL,   -- 실제로 보낸 목표값
+    applied_temp_c REAL,
+    applied_wash_time_min REAL
+);
 """
 
 
@@ -109,3 +124,22 @@ def running_batch() -> dict | None:
 def count_batches_with_prefix(prefix: str) -> int:
     with connect() as conn:
         return conn.execute("SELECT COUNT(*) FROM batches WHERE batch_id LIKE ?", (prefix + "%",)).fetchone()[0]
+
+
+# ---------------- 추천 결정 이력 ----------------
+
+def insert_decision(d: dict):
+    cols = ", ".join(d.keys())
+    marks = ", ".join("?" for _ in d)
+    with connect() as conn:
+        conn.execute(f"INSERT INTO decisions ({cols}) VALUES ({marks})", tuple(d.values()))
+
+
+def recent_decisions(limit: int = 10, batch_id: str | None = None) -> list[dict]:
+    with connect() as conn:
+        if batch_id:
+            rows = conn.execute("SELECT * FROM decisions WHERE batch_id = ? ORDER BY id DESC LIMIT ?",
+                                (batch_id, limit)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]

@@ -142,9 +142,12 @@ function renderAlerts() {
     if (!app.deviceOnline) list.push(["bad", "장치 연결 끊김: 15초 이상 하트비트가 없습니다"]);
     if (!app.mqttConnected) list.push(["bad", "서버가 MQTT 브로커에 연결되지 않았습니다"]);
     if (app.influxError) list.push(["warn", "InfluxDB 저장 문제: " + app.influxError]);
-    const d = app.sensor;
-    if (d && app.recipes && d.turbidity_ntu > app.recipes.turbidity_limit_ntu)
-      list.push(["warn", `탁도 ${d.turbidity_ntu.toFixed(1)} NTU: 교체 기준(${app.recipes.turbidity_limit_ntu}) 초과`]);
+    // 추천 중 "주의(alert)" 항목은 대시보드에도 경고로 띄운다 (탁도 초과, 등급 상향 검토 등)
+    const r = app.recommendation;
+    if (r && r.available)
+      r.items.filter((i) => i.level === "alert").forEach((i) => list.push(["warn", `${i.action} — ${i.reason}`]));
+    else if (app.sensor && app.recipes && app.sensor.turbidity_ntu > app.recipes.turbidity_limit_ntu)
+      list.push(["warn", `탁도 ${app.sensor.turbidity_ntu.toFixed(1)} NTU: 교체 기준(${app.recipes.turbidity_limit_ntu}) 초과`]);
   }
   $("alerts").innerHTML = list.map(([cls, text]) => `<div class="alert ${cls}">${text}</div>`).join("");
 }
@@ -371,8 +374,46 @@ function syncSlidersToGrade() {
   filledGrade = g;
 }
 
+// ---------------- 추천 조치 ----------------
+function renderRecommendation() {
+  const r = app.recommendation;
+  if (!r || !r.available) {
+    $("rec-head").textContent = r ? r.message : "-";
+    $("rec-items").innerHTML = "";
+    $("btn-approve").disabled = true;
+    return;
+  }
+  const t = r.target;
+  $("rec-head").innerHTML = `배치 <b>${r.batch_id}</b> · 등급 ${r.grade} (${r.grade_name}) 레시피 목표: ` +
+    `농도 ${t.target_concentration_pct}% · 온도 ${t.target_temp_c}°C · 세척 ${t.wash_time_min}분`;
+  $("rec-items").innerHTML = r.items
+    .map((i) => `<li class="${i.level}"><div class="act">${i.action}</div><div class="why">근거: ${i.reason}</div></li>`)
+    .join("");
+  $("btn-approve").disabled = false;
+}
+
+async function loadDecisions() {
+  const rows = await (await fetch("/api/decisions?limit=8")).json();
+  const v = (x, unit) => (x == null ? "-" : x + unit);
+  $("decision-list").innerHTML = rows.length === 0
+    ? `<tr><td colspan="6">아직 결정 이력이 없습니다</td></tr>`
+    : rows.map((d) => `<tr>
+        <td>${fmtTime(d.ts)}</td><td>${d.batch_id ?? "-"}</td><td>${d.grade ?? "-"}</td>
+        <td>${d.recommended ?? "-"}</td><td>${d.decision}</td>
+        <td>${d.decision === "세척수 교체 지시" ? "-" :
+          `${v(d.applied_concentration_pct, "%")} / ${v(d.applied_temp_c, "°C")} / ${v(d.applied_wash_time_min, "분")}`}</td>
+      </tr>`).join("");
+}
+
+$("btn-approve").onclick = () => api("POST", "/api/recommendation/approve", null, "rec-error");
+$("btn-water").onclick = () => {
+  if (confirm("세척수를 교체할까요? 약품 농도와 온도가 새 물 기준으로 내려갑니다."))
+    api("POST", "/api/device/replace_water", null, "rec-error");
+};
+
 function renderAll() {
   renderSensor();
+  renderRecommendation();
   renderDevice();
   renderAlerts();
   renderControl();
@@ -413,7 +454,15 @@ function connect() {
         app.influxError = msg.data.influx_error;
         app.lastSetpoint = msg.data.last_setpoint;
         app.batch = msg.data.batch;
+        app.recommendation = msg.data.recommendation;
         loadBatches();
+        loadDecisions();
+        break;
+      case "recommendation":
+        app.recommendation = msg.data;
+        break;
+      case "decision":
+        loadDecisions();
         break;
       case "batch":
         app.batch = msg.data;
