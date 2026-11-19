@@ -2,6 +2,8 @@
 
 const MAX_POINTS = 300; // 그래프에 남길 점 개수 (2초 간격 → 약 10분)
 const $ = (id) => document.getElementById(id);
+const STREAMS = ["contaminated", "clean"]; // 선별 결과 = 저장함 = 레시피 키
+const STREAM_NAME = { contaminated: "오염", clean: "비오염" };
 
 const app = {
   recipes: null,
@@ -11,7 +13,21 @@ const app = {
   mqttConnected: true,
   influxError: null,
   wsOpen: false,
+  lot: null,    // 선별 중인 수거 배치
+  bins: null,   // 저장함 {contaminated: {n, threshold}, clean: {...}}
+  wash: null,   // 세척 중인 세척 배치
+  recommendation: null,
+  lastSetpoint: null,
 };
+
+// 작업자가 입력한 글자(메모, 레시피 이름)를 HTML에 넣기 전에 바꿔 둔다
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+const recipeName = (k) =>
+  (app.recipes && app.recipes.recipes[k] ? app.recipes.recipes[k].name : k ?? "-");
 
 // ---------------- 탭 전환 ----------------
 const tabs = [...document.querySelectorAll(".tab")];
@@ -169,17 +185,32 @@ function renderDevice() {
   $("v-device-msg").textContent = msg;
 }
 
+function renderCards() {
+  const lot = app.lot;
+  $("v-lot").textContent = lot ? lot.lot_id : "없음";
+  $("v-lot-sub").textContent = lot
+    ? `판정 ${lot.total_n}병 · 오염 비율 ${lot.ratio_pct == null ? "-" : lot.ratio_pct + "%"}` : "";
+  if (app.bins) {
+    const c = app.bins.contaminated, n = app.bins.clean;
+    $("v-bins").textContent = `${c.n} / ${n.n}`;
+    $("v-bins-sub").textContent = `임계치 ${c.threshold} / ${n.threshold}병`;
+  }
+  const w = app.wash;
+  $("v-wash").textContent = w ? w.batch_id : "없음";
+  $("v-wash-sub").textContent = w ? `${STREAM_NAME[w.stream]} ${w.bottle_n}병 · ${recipeName(w.recipe)} 레시피` : "";
+}
+
 function renderAlerts() {
   const list = [];
   if (!app.wsOpen) list.push(["bad", "서버와 연결이 끊겼습니다. 다시 연결하는 중…"]);
   else {
     if (!app.deviceOnline) list.push(["bad", "장치 연결 끊김: 15초 이상 하트비트가 없습니다"]);
     if (!app.mqttConnected) list.push(["bad", "서버가 MQTT 브로커에 연결되지 않았습니다"]);
-    if (app.influxError) list.push(["warn", "InfluxDB 저장 문제: " + app.influxError]);
-    // 추천 중 "주의(alert)" 항목은 대시보드에도 경고로 띄운다 (탁도 초과, 등급 상향 검토 등)
+    if (app.influxError) list.push(["warn", "InfluxDB 저장 문제: " + esc(app.influxError)]);
+    // 추천 중 "주의(alert)" 항목은 대시보드에도 경고로 띄운다 (탁도 초과, 선별 오류 의심 등)
     const r = app.recommendation;
     if (r && r.available)
-      r.items.filter((i) => i.level === "alert").forEach((i) => list.push(["warn", `${i.action} — ${i.reason}`]));
+      r.items.filter((i) => i.level === "alert").forEach((i) => list.push(["warn", `${esc(i.action)} — ${esc(i.reason)}`]));
     else if (app.sensor && app.recipes && app.sensor.turbidity_ntu > app.recipes.turbidity_limit_ntu)
       list.push(["warn", `탁도 ${app.sensor.turbidity_ntu.toFixed(1)} NTU: 교체 기준(${app.recipes.turbidity_limit_ntu}) 초과`]);
   }
@@ -202,11 +233,12 @@ function setupSliders() {
     [input.min, input.max] = safety[s.key];
     input.oninput = () => ($(s.out).textContent = Number(input.value).toFixed(s.digits));
   }
-  // 등급 레시피 버튼
-  $("preset-row").innerHTML = Object.entries(app.recipes.grades)
-    .map(([g, r]) => `<button data-grade="${g}">등급 ${g} (${r.name})</button>`).join("");
-  $("preset-row").querySelectorAll("button").forEach((b) => (b.onclick = () => fillSliders(app.recipes.grades[b.dataset.grade])));
-  fillSliders(app.recipes.grades[0]);
+  // 레시피 버튼
+  $("preset-row").innerHTML = STREAMS
+    .map((k) => `<button data-recipe="${k}">${esc(recipeName(k))} 레시피</button>`).join("");
+  $("preset-row").querySelectorAll("button").forEach((b) =>
+    (b.onclick = () => fillSliders(app.recipes.recipes[b.dataset.recipe])));
+  fillSliders(app.recipes.recipes[app.wash ? app.wash.recipe : "clean"]);
   slidersReady = true;
 }
 
@@ -246,7 +278,7 @@ function fmtTime(iso) {
 }
 
 function spRows(sp) {
-  return `<tr><th>배치</th><td>${sp.batch_id ?? "-"}</td></tr>
+  return `<tr><th>세척 배치</th><td>${esc(sp.batch_id ?? "-")}</td></tr>
     <tr><th>약품 농도</th><td>${sp.target_concentration_pct} %</td></tr>
     <tr><th>온도</th><td>${sp.target_temp_c} °C</td></tr>
     <tr><th>세척 시간</th><td>${sp.wash_time_min} 분</td></tr>
@@ -265,15 +297,15 @@ function renderControl() {
     $("last-sp").innerHTML = spRows(sp) +
       `<tr><th>장치 적용 여부</th><td class="${cls}">${label}</td></tr>` +
       (sp.result_at ? `<tr><th>응답 시각</th><td>${fmtTime(sp.result_at)}</td></tr>` : "") +
-      (sp.result_message ? `<tr><th>장치 메시지</th><td>${sp.result_message}</td></tr>` : "");
+      (sp.result_message ? `<tr><th>장치 메시지</th><td>${esc(sp.result_message)}</td></tr>` : "");
   }
   const st = app.deviceStatus;
   if (!app.deviceOnline) {
     $("applied-sp").innerHTML = `<tr><td class="st-bad">장치 연결 끊김</td></tr>`;
   } else if (!st || !st.applied) {
-    $("applied-sp").innerHTML = `<tr><td>적용 중인 목표값 없음 (${st ? st.state : "-"})</td></tr>`;
+    $("applied-sp").innerHTML = `<tr><td>적용 중인 목표값 없음 (${st ? esc(st.state) : "-"})</td></tr>`;
   } else {
-    $("applied-sp").innerHTML = spRows(st.applied) + `<tr><th>장치 상태</th><td>${st.state}</td></tr>`;
+    $("applied-sp").innerHTML = spRows(st.applied) + `<tr><th>장치 상태</th><td>${esc(st.state)}</td></tr>`;
   }
 }
 
@@ -300,7 +332,6 @@ function confirmButton(btn, confirmText, action) {
   }
 }
 
-// ---------------- 배치 관리 ----------------
 async function api(method, url, body, errEl) {
   if (errEl) $(errEl).textContent = "";
   const res = await fetch(url, {
@@ -318,115 +349,176 @@ async function api(method, url, body, errEl) {
   return data;
 }
 
-const gradeName = (g) => (g == null ? "-" : `${g} (${app.recipes ? app.recipes.grades[g].name : ""})`);
+// 자주 오는 알림(카메라 판정은 0.3초마다)에 목록을 매번 다시 불러오지 않도록 묶어서 한 번만
+function throttle(fn, ms) {
+  let timer = null;
+  return () => {
+    if (timer) return;
+    timer = setTimeout(() => { timer = null; fn(); }, ms);
+  };
+}
 
-let renderedBatchId = undefined; // 현재 그려 둔 배치 (바뀔 때만 구조를 새로 그림)
+// ---------------- 배치 관리: 선별 중 수거 배치 ----------------
+let renderedLotId; // 현재 그려 둔 수거 배치 (바뀔 때만 구조를 새로 그림, 확인 버튼 상태 유지)
 
-function renderBatch() {
-  const b = app.batch;
-  const box = $("cur-batch");
-  const id = b ? b.batch_id : null;
-
-  // 배치가 바뀌었을 때만 화면 구조를 다시 만든다 (등급 선택 상자가 초기화되지 않도록)
-  if (id !== renderedBatchId) {
-    renderedBatchId = id;
-    if (!b) {
-      box.innerHTML = `<p class="hint">진행 중인 배치가 없습니다.</p>`;
+function renderLot() {
+  const lot = app.lot;
+  const box = $("cur-lot");
+  const id = lot ? lot.lot_id : null;
+  if (id !== renderedLotId) {
+    renderedLotId = id;
+    if (!lot) {
+      box.innerHTML = `<p class="hint">선별 중인 수거 배치가 없습니다. 아래 수거 배치 목록에서 만들고 시작하세요.</p>`;
     } else {
-      const options = [0, 1, 2, 3].map((g) => `<option value="${g}">등급 ${gradeName(g)}</option>`).join("");
       box.innerHTML = `
         <table class="kv">
-          <tr><th>배치</th><td><b>${b.batch_id}</b></td></tr>
-          <tr><th>메모</th><td>${b.note || "-"}</td></tr>
-          <tr><th>시작 시각</th><td>${fmtTime(b.started_at)}</td></tr>
+          <tr><th>수거 배치</th><td><b>${esc(lot.lot_id)}</b></td></tr>
+          <tr><th>메모</th><td>${esc(lot.note) || "-"}</td></tr>
+          <tr><th>선별 시작</th><td>${fmtTime(lot.started_at)}</td></tr>
+          <tr><th>카메라</th><td id="l-remain">-</td></tr>
         </table>
         <div class="counts">
-          <div class="count-box"><div class="n" id="b-cont">0</div><div class="l">오염 판정</div></div>
-          <div class="count-box"><div class="n" id="b-clean">0</div><div class="l">비오염 판정</div></div>
-          <div class="count-box"><div class="n" id="b-total">0</div><div class="l">합계</div></div>
-          <div class="count-box"><div class="n" id="b-ratio">-</div><div class="l">오염 비율</div></div>
+          <div class="count-box"><div class="n" id="l-cont">0</div><div class="l">오염 → 오염 저장함</div></div>
+          <div class="count-box"><div class="n" id="l-clean">0</div><div class="l">비오염 → 비오염 저장함</div></div>
+          <div class="count-box"><div class="n" id="l-ratio">-</div><div class="l">오염 비율</div></div>
         </div>
-        <div class="ratio-bar"><div id="b-bar" style="width:0%"></div></div>
-        <table class="kv">
-          <tr><th>시스템 제안 등급</th><td id="b-suggest">-</td></tr>
-          <tr><th>제안 근거</th><td id="b-reason">-</td></tr>
-          <tr><th>작업자 확정 등급</th><td id="b-final">-</td></tr>
-        </table>
-        <div class="grade-row">
-          <label for="b-grade">최종 등급</label>
-          <select id="b-grade">${options}</select>
-          <button id="btn-grade" class="primary">등급 확정</button>
-        </div>
-        <div class="btn-row"><button id="btn-end" class="danger">배치 종료</button></div>`;
-      $("b-grade").value = b.final_grade ?? b.suggested_grade ?? 0;
-      $("btn-grade").onclick = async () => {
-        const ok = await api("POST", `/api/batches/${b.batch_id}/grade`, { grade: Number($("b-grade").value) }, "batch-error");
-        if (ok) $("b-grade").dataset.touched = ""; // 확정 후에는 다시 확정 등급을 따라감
-      };
-      confirmButton($("btn-end"), "한 번 더 누르면 종료 (펌프·히터 정지)",
-        () => api("POST", `/api/batches/${b.batch_id}/end`, null, "batch-error"));
-      $("b-grade").dataset.touched = "";
-      $("b-grade").onchange = () => ($("b-grade").dataset.touched = "1");
+        <div class="ratio-bar"><div id="l-bar" style="width:0%"></div></div>
+        <div class="btn-row"><button id="btn-lot-end" class="danger">선별 종료 (수동)</button></div>`;
+      confirmButton($("btn-lot-end"), "한 번 더 누르면 선별 종료 (카메라 정지)",
+        () => api("POST", `/api/lots/${encodeURIComponent(lot.lot_id)}/end`, null, "err-lot"));
     }
   }
-  if (!b) return;
-
-  // 숫자 갱신
-  $("b-cont").textContent = b.contaminated_n;
-  $("b-clean").textContent = b.clean_n;
-  $("b-total").textContent = b.total_n;
-  $("b-ratio").textContent = b.ratio_pct == null ? "-" : b.ratio_pct + "%";
-  $("b-bar").style.width = (b.ratio_pct || 0) + "%";
-  $("b-suggest").textContent = b.suggested_grade == null ? "판정 결과 대기 중" : `등급 ${gradeName(b.suggested_grade)}`;
-  $("b-reason").textContent = b.suggest_reason || "-";
-  $("b-final").innerHTML = b.final_grade == null
-    ? `<span class="st-wait">미확정</span>`
-    : `<span class="st-ok">등급 ${gradeName(b.final_grade)}</span> (${fmtTime(b.graded_at)})`;
-  // 작업자가 선택 상자를 건드리지 않았다면 확정 등급(없으면 제안 등급)을 따라가게 한다
-  const follow = b.final_grade ?? b.suggested_grade;
-  if (!$("b-grade").dataset.touched && follow != null) $("b-grade").value = follow;
+  if (!lot) return;
+  $("l-cont").textContent = lot.contaminated_n;
+  $("l-clean").textContent = lot.clean_n;
+  $("l-ratio").textContent = lot.ratio_pct == null ? "-" : lot.ratio_pct + "%";
+  $("l-bar").style.width = (lot.ratio_pct || 0) + "%";
+  const st = app.deviceStatus;
+  $("l-remain").textContent = !st || st.lot_id !== lot.lot_id ? "장치 응답 대기"
+    : st.lot_remaining > 0 ? `판정 중 · 남은 병 ${st.lot_remaining}개` : "판정 끝";
 }
 
-async function loadBatches() {
-  const rows = await (await fetch("/api/batches")).json();
-  $("batch-list").innerHTML = rows.length === 0
-    ? `<tr><td colspan="10">배치가 없습니다</td></tr>`
+// ---------------- 배치 관리: 선별 저장함 ----------------
+let binsBuilt = false;
+
+function renderBins() {
+  if (!app.bins) return;
+  if (!binsBuilt) {
+    $("bins").innerHTML = STREAMS.map((s) => `
+      <div class="bin-box">
+        <div class="l">${STREAM_NAME[s]} 저장함</div>
+        <div class="n"><span id="bin-n-${s}">0</span><span class="of"> / <span id="bin-t-${s}">-</span>병</span></div>
+        <div class="ratio-bar ${s}"><div id="bin-bar-${s}" style="width:0%"></div></div>
+        <button id="btn-bundle-${s}">지금 묶기</button>
+      </div>`).join("");
+    STREAMS.forEach((s) => confirmButton($(`btn-bundle-${s}`), "한 번 더 누르면 세척 배치로 묶음",
+      () => api("POST", `/api/bins/${s}/bundle`, null, "err-bins")));
+    binsBuilt = true;
+  }
+  for (const s of STREAMS) {
+    const b = app.bins[s];
+    $(`bin-n-${s}`).textContent = b.n;
+    $(`bin-t-${s}`).textContent = b.threshold;
+    $(`bin-bar-${s}`).style.width = Math.min(100, (b.n / b.threshold) * 100) + "%";
+    $(`btn-bundle-${s}`).disabled = b.n === 0;
+  }
+}
+
+// ---------------- 배치 관리: 세척 중 배치 ----------------
+let renderedWashId;
+
+function renderWash() {
+  const w = app.wash;
+  const box = $("cur-wash");
+  const id = w ? w.batch_id : null;
+  if (id !== renderedWashId) {
+    renderedWashId = id;
+    if (!w) {
+      box.innerHTML = `<p class="hint">세척 중인 배치가 없습니다. 아래 세척 배치 목록에서 대기 중인 배치를 시작하세요.</p>`;
+    } else {
+      const options = STREAMS.map((k) => `<option value="${k}">${esc(recipeName(k))} 레시피</option>`).join("");
+      const sources = w.sources.map((s) => `${esc(s.lot_id)} (${s.n}병)`).join(", ") || "-";
+      box.innerHTML = `
+        <table class="kv">
+          <tr><th>세척 배치</th><td><b>${esc(w.batch_id)}</b></td></tr>
+          <tr><th>구분</th><td>${STREAM_NAME[w.stream]} 저장함 · ${w.bottle_n}병</td></tr>
+          <tr><th>출처 수거 배치</th><td>${sources}</td></tr>
+          <tr><th>세척 시작</th><td>${fmtTime(w.started_at)}</td></tr>
+          <tr><th>적용 레시피</th><td id="w-recipe">-</td></tr>
+        </table>
+        <div class="grade-row">
+          <label for="w-recipe-sel">레시피 변경</label>
+          <select id="w-recipe-sel">${options}</select>
+          <button id="btn-recipe" class="primary">변경</button>
+        </div>
+        <div class="btn-row"><button id="btn-wash-end" class="danger">세척 배치 종료</button></div>`;
+      $("w-recipe-sel").value = w.recipe;
+      $("btn-recipe").onclick = () => api("POST", `/api/wash_batches/${encodeURIComponent(w.batch_id)}/recipe`,
+        { recipe: $("w-recipe-sel").value }, "err-wash");
+      confirmButton($("btn-wash-end"), "한 번 더 누르면 종료 (펌프·히터 정지)",
+        () => api("POST", `/api/wash_batches/${encodeURIComponent(w.batch_id)}/end`, null, "err-wash"));
+    }
+  }
+  if (!w) return;
+  $("w-recipe").innerHTML = `${esc(recipeName(w.recipe))} 레시피` +
+    (w.recipe !== w.stream ? ` <span class="warn-text">(저장함 구분과 다르게 변경됨)</span>` : "");
+}
+
+// ---------------- 배치 관리: 목록 ----------------
+async function loadWashBatches() {
+  const rows = await (await fetch("/api/wash_batches")).json();
+  $("wash-list").innerHTML = rows.length === 0
+    ? `<tr><td colspan="10">세척 배치가 없습니다. 저장함이 임계치에 도달하면 만들어집니다.</td></tr>`
     : rows.map((b) => `<tr>
-        <td>${b.batch_id}</td>
-        <td>${b.status}</td>
-        <td>${b.note || ""}</td>
-        <td>${b.contaminated_n} / ${b.clean_n}</td>
-        <td>${b.ratio_pct == null ? "-" : b.ratio_pct + "%"}</td>
-        <td>${b.suggested_grade ?? "-"}</td>
-        <td>${b.final_grade ?? "-"}</td>
-        <td>${b.started_at ? fmtTime(b.started_at) : "-"}</td>
-        <td>${b.ended_at ? fmtTime(b.ended_at) : "-"}</td>
-        <td>${b.status === "생성됨" ? `<button data-start="${b.batch_id}">시작</button>` : ""}</td>
+        <td>${esc(b.batch_id)}</td>
+        <td class="${b.status === "세척 중" ? "st-ok" : ""}">${esc(b.status)}</td>
+        <td>${STREAM_NAME[b.stream] ?? esc(b.stream)}</td>
+        <td>${b.bottle_n}</td>
+        <td>${esc(b.sources || "-")}</td>
+        <td>${esc(recipeName(b.recipe))}</td>
+        <td>${fmtTime(b.created_at)} <span class="hint">(${b.created_by === "auto" ? "임계치" : "지금 묶기"})</span></td>
+        <td>${fmtTime(b.started_at)}</td>
+        <td>${fmtTime(b.ended_at)}</td>
+        <td>${b.status === "대기" ? `<button data-wash="${esc(b.batch_id)}">세척 시작</button>` : ""}</td>
       </tr>`).join("");
-  $("batch-list").querySelectorAll("[data-start]").forEach((btn) =>
-    (btn.onclick = () => api("POST", `/api/batches/${btn.dataset.start}/start`, null, "batch-error")));
+  $("wash-list").querySelectorAll("[data-wash]").forEach((btn) =>
+    (btn.onclick = () => api("POST", `/api/wash_batches/${encodeURIComponent(btn.dataset.wash)}/start`, null, "err-washlist")));
 }
 
-// 카메라 판정이 0.3초마다 들어오므로 목록 새로고침은 최대 1.5초에 한 번만
-let listTimer = null;
-function scheduleLoadBatches() {
-  if (listTimer) return;
-  listTimer = setTimeout(() => { listTimer = null; loadBatches(); }, 1500);
+async function loadLots() {
+  const rows = await (await fetch("/api/lots")).json();
+  $("lot-list").innerHTML = rows.length === 0
+    ? `<tr><td colspan="8">수거 배치가 없습니다</td></tr>`
+    : rows.map((l) => `<tr>
+        <td>${esc(l.lot_id)}</td>
+        <td class="${l.status === "선별 중" ? "st-ok" : ""}">${esc(l.status)}</td>
+        <td>${esc(l.note)}</td>
+        <td>${l.contaminated_n} / ${l.clean_n}</td>
+        <td>${l.ratio_pct == null ? "-" : l.ratio_pct + "%"}</td>
+        <td>${fmtTime(l.started_at)}</td>
+        <td>${fmtTime(l.ended_at)}</td>
+        <td>${l.status === "생성됨" ? `<button data-start="${esc(l.lot_id)}">선별 시작</button>` : ""}</td>
+      </tr>`).join("");
+  $("lot-list").querySelectorAll("[data-start]").forEach((btn) =>
+    (btn.onclick = () => api("POST", `/api/lots/${encodeURIComponent(btn.dataset.start)}/start`, null, "err-lotlist")));
 }
 
-$("btn-new-batch").onclick = async () => {
-  const b = await api("POST", "/api/batches", { note: $("new-note").value.trim() }, "batch-error");
-  if (b) { $("new-note").value = ""; loadBatches(); }
+const scheduleLoadLots = throttle(loadLots, 1500);
+const scheduleLoadWash = throttle(loadWashBatches, 300);
+
+$("btn-new-lot").onclick = async () => {
+  const lot = await api("POST", "/api/lots", { note: $("new-note").value.trim() }, "err-lotlist");
+  if (lot) { $("new-note").value = ""; loadLots(); }
 };
 
-// 등급이 확정되면 세척 제어 슬라이더를 그 등급 레시피로 채워 둔다
-let filledGrade = null;
-function syncSlidersToGrade() {
-  const g = app.batch ? app.batch.final_grade : null;
-  if (g != null && g !== filledGrade && app.recipes && slidersReady) {
-    fillSliders(app.recipes.grades[g]);
+// 세척 배치의 레시피가 정해지거나 바뀌면 세척 제어 슬라이더를 그 레시피로 채워 둔다
+let filledRecipe = null;
+function syncSlidersToRecipe() {
+  const k = app.wash ? app.wash.recipe : null;
+  if (k != null && k !== filledRecipe && app.recipes && slidersReady) {
+    fillSliders(app.recipes.recipes[k]);
   }
-  filledGrade = g;
+  filledRecipe = k;
 }
 
 // ---------------- 추천 조치 ----------------
@@ -455,10 +547,11 @@ function renderRecommendation() {
     btn.className = "primary";
     btn.textContent = "추천 승인 (레시피 목표값 전송)";
   }
-  $("rec-head").innerHTML = `배치 <b>${r.batch_id}</b> · 등급 ${r.grade} (${r.grade_name}) 레시피 목표: ` +
+  $("rec-head").innerHTML = `세척 배치 <b>${esc(r.batch_id)}</b> (${STREAM_NAME[r.stream]} 저장함) · ` +
+    `${esc(r.recipe_name)} 레시피 목표: ` +
     `농도 ${t.target_concentration_pct}% · 온도 ${t.target_temp_c}°C · 세척 ${t.wash_time_min}분`;
   $("rec-items").innerHTML = r.items
-    .map((i) => `<li class="${i.level}"><div class="act">${i.action}</div><div class="why">근거: ${i.reason}</div></li>`)
+    .map((i) => `<li class="${i.level}"><div class="act">${esc(i.action)}</div><div class="why">근거: ${esc(i.reason)}</div></li>`)
     .join("");
 }
 
@@ -468,9 +561,9 @@ async function loadDecisions() {
   $("decision-list").innerHTML = rows.length === 0
     ? `<tr><td colspan="6">아직 결정 이력이 없습니다</td></tr>`
     : rows.map((d) => `<tr>
-        <td>${fmtTime(d.ts)}</td><td>${d.batch_id ?? "-"}</td><td>${d.grade ?? "-"}</td>
-        <td>${d.recommended ?? "-"}</td><td>${d.decision}</td>
-        <td>${d.decision === "세척수 교체 지시" ? "-" :
+        <td>${fmtTime(d.ts)}</td><td>${esc(d.batch_id ?? "-")}</td><td>${d.recipe ? esc(recipeName(d.recipe)) : "-"}</td>
+        <td>${esc(d.recommended ?? "-")}</td><td>${esc(d.decision)}</td>
+        <td>${d.applied_concentration_pct == null ? "-" :
           `${v(d.applied_concentration_pct, "%")} / ${v(d.applied_temp_c, "°C")} / ${v(d.applied_wash_time_min, "분")}`}</td>
       </tr>`).join("");
 }
@@ -513,12 +606,13 @@ async function loadBatchHistory() {
   const rows = await (await fetch("/api/history")).json();
   const n = (x, d, unit = "") => (x == null ? "-" : Number(x).toFixed(d) + unit);
   $("history-list").innerHTML = rows.length === 0
-    ? `<tr><td colspan="11">종료된 배치가 없습니다</td></tr>`
+    ? `<tr><td colspan="12">종료된 세척 배치가 없습니다</td></tr>`
     : rows.map((r) => `<tr>
-        <td>${r.batch_id}${r.note ? `<div class="hint" style="margin:0">${r.note}</div>` : ""}</td>
+        <td>${esc(r.batch_id)}</td>
         <td>${fmtTime(r.ended_at)}</td>
-        <td>${r.ratio_pct == null ? "-" : r.ratio_pct + "%"} <span class="hint">(${r.contaminated_n}/${r.contaminated_n + r.clean_n})</span></td>
-        <td>${r.suggested_grade ?? "-"} → <b>${r.final_grade ?? "-"}</b></td>
+        <td>${esc(r.stream_name)} · ${r.bottle_n}병</td>
+        <td>${esc(r.sources || "-")}</td>
+        <td>${esc(r.recipe_name)}</td>
         <td>${r.applied_concentration_pct == null ? "적용 없음"
           : `${r.applied_concentration_pct}% · ${r.applied_temp_c}°C · ${r.applied_wash_time_min}분`}</td>
         <td>${n(r.avg_concentration_pct, 2, "%")}</td>
@@ -526,23 +620,30 @@ async function loadBatchHistory() {
         <td>${n(r.avg_turbidity_ntu, 1)} / ${n(r.max_turbidity_ntu, 1)}</td>
         <td>${fmtDuration(r.pump_on_s)}</td>
         <td>${fmtDuration(r.heater_on_s)}</td>
-        <td>${r.samples == null ? `<button data-sum="${r.batch_id}">요약 계산</button>` : ""}</td>
+        <td>${r.samples == null ? `<button data-sum="${esc(r.batch_id)}">요약 계산</button>` : ""}</td>
       </tr>`).join("");
   $("history-list").querySelectorAll("[data-sum]").forEach((b) =>
-    (b.onclick = async () => { await api("POST", `/api/batches/${b.dataset.sum}/summary`); loadBatchHistory(); }));
+    (b.onclick = async () => {
+      await api("POST", `/api/wash_batches/${encodeURIComponent(b.dataset.sum)}/summary`);
+      loadBatchHistory();
+    }));
 }
 
 // ---------------- 설정 ----------------
 function fillSettings(r) {
-  $("set-grades").innerHTML = Object.entries(r.grades).map(([g, x]) => `<tr data-grade="${g}">
-      <td>${g}</td>
-      <td><input class="name" data-k="name" value="${x.name}"></td>
+  $("set-recipes").innerHTML = STREAMS.map((k) => {
+    const x = r.recipes[k];
+    return `<tr data-recipe="${k}">
+      <td>${STREAM_NAME[k]} 저장함</td>
+      <td><input class="name" data-k="name" value="${esc(x.name)}"></td>
       <td><input type="number" step="0.1" data-k="concentration_pct" value="${x.concentration_pct}"></td>
       <td><input type="number" step="1" data-k="temp_c" value="${x.temp_c}"></td>
       <td><input type="number" step="1" data-k="wash_time_min" value="${x.wash_time_min}"></td>
       <td><input type="number" step="0.01" data-k="expected_decay_pct_per_min" value="${x.expected_decay_pct_per_min}"></td>
-    </tr>`).join("");
-  [$("set-t0").value, $("set-t1").value, $("set-t2").value] = r.grade_thresholds_pct;
+    </tr>`;
+  }).join("");
+  $("set-bin-c").value = r.bin_threshold.contaminated;
+  $("set-bin-n").value = r.bin_threshold.clean;
   $("set-tol-c").value = r.tolerance.concentration_pct;
   $("set-tol-t").value = r.tolerance.temp_c;
   $("set-turb").value = r.turbidity_limit_ntu;
@@ -553,15 +654,15 @@ function fillSettings(r) {
 }
 
 function readSettings() {
-  const grades = {};
-  document.querySelectorAll("#set-grades tr").forEach((tr) => {
+  const recipes = {};
+  document.querySelectorAll("#set-recipes tr").forEach((tr) => {
     const g = {};
     tr.querySelectorAll("input").forEach((i) => (g[i.dataset.k] = i.dataset.k === "name" ? i.value.trim() : Number(i.value)));
-    grades[tr.dataset.grade] = g;
+    recipes[tr.dataset.recipe] = g;
   });
   return {
-    grades,
-    grade_thresholds_pct: [Number($("set-t0").value), Number($("set-t1").value), Number($("set-t2").value)],
+    recipes,
+    bin_threshold: { contaminated: Number($("set-bin-c").value), clean: Number($("set-bin-n").value) },
     tolerance: { concentration_pct: Number($("set-tol-c").value), temp_c: Number($("set-tol-t").value) },
     turbidity_limit_ntu: Number($("set-turb").value),
     decay_alert_factor: Number($("set-decay").value),
@@ -599,15 +700,13 @@ function renderAll() {
   renderSpeed();
   renderRecommendation();
   renderDevice();
+  renderCards();
   renderAlerts();
   renderControl();
-  renderBatch();
-  syncSlidersToGrade();
-  const b = app.batch;
-  $("v-batch").textContent = b ? b.batch_id : "없음";
-  $("v-batch-sub").textContent = !b ? "" : b.final_grade != null
-    ? `확정 등급 ${gradeName(b.final_grade)}`
-    : b.suggested_grade != null ? `제안 등급 ${b.suggested_grade} (미확정)` : "카메라 판정 대기";
+  renderLot();
+  renderBins();
+  renderWash();
+  syncSlidersToRecipe();
 }
 
 // ---------------- WebSocket ----------------
@@ -637,9 +736,13 @@ function connect() {
         app.mqttConnected = msg.data.mqtt_connected;
         app.influxError = msg.data.influx_error;
         app.lastSetpoint = msg.data.last_setpoint;
-        app.batch = msg.data.batch;
+        app.lot = msg.data.lot;
+        app.bins = msg.data.bins;
+        app.wash = msg.data.wash;
         app.recommendation = msg.data.recommendation;
-        loadBatches();
+        renderedLotId = renderedWashId = undefined; // 다시 연결되면 화면 구조를 새로 그린다
+        loadLots();
+        loadWashBatches();
         loadDecisions();
         loadBatchHistory();
         fillSettings(app.recipes);
@@ -649,8 +752,10 @@ function connect() {
         break;
       case "recipes":
         app.recipes = msg.data;
-        slidersReady = false; // 등급 버튼·슬라이더를 새 레시피로 다시 만든다
+        slidersReady = false;        // 레시피 버튼·슬라이더를 새 이름·값으로 다시 만든다
+        renderedWashId = undefined;  // 레시피 선택 상자의 이름도 새로
         fillSettings(app.recipes);
+        loadWashBatches();
         break;
       case "recommendation":
         app.recommendation = msg.data;
@@ -658,9 +763,22 @@ function connect() {
       case "decision":
         loadDecisions();
         break;
-      case "batch":
-        app.batch = msg.data;
-        scheduleLoadBatches();
+      case "lot":
+        app.lot = msg.data;
+        scheduleLoadLots();
+        break;
+      case "lots":
+        scheduleLoadLots();
+        break;
+      case "bins":
+        app.bins = msg.data;
+        break;
+      case "wash":
+        app.wash = msg.data;
+        scheduleLoadWash();
+        break;
+      case "wash_batches":
+        scheduleLoadWash();
         break;
       case "setpoint":
         app.lastSetpoint = msg.data;

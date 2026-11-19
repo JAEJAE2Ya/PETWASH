@@ -38,7 +38,9 @@
       </div>
 
       <div class="cards">
-        <div class="card"><div class="label">진행 중 배치</div><div class="value" id="v-batch">-</div><div class="sub" id="v-batch-sub"></div></div>
+        <div class="card"><div class="label">선별 중 수거 배치</div><div class="value id" id="v-lot">-</div><div class="sub" id="v-lot-sub"></div></div>
+        <div class="card"><div class="label">저장함 (오염 / 비오염)</div><div class="value" id="v-bins">-</div><div class="sub" id="v-bins-sub"></div></div>
+        <div class="card"><div class="label">세척 중 배치</div><div class="value id" id="v-wash">-</div><div class="sub" id="v-wash-sub"></div></div>
         <div class="card"><div class="label">장치</div><div class="value" id="v-device">-</div><div class="sub" id="v-device-msg"></div></div>
         <div class="card"><div class="label">약품 농도</div><div class="value"><span id="v-conc">-</span> %</div><div class="sub" id="t-conc"></div></div>
         <div class="card"><div class="label">온도</div><div class="value"><span id="v-temp">-</span> °C</div><div class="sub" id="t-temp"></div></div>
@@ -55,28 +57,57 @@
       </div>
     </section>
 
-    <!-- 배치 관리 -->
+    <!-- 배치 관리: 수거 배치(선별 전) → 선별 저장함 → 세척 배치 -->
     <section id="tab-batch" class="page">
-      <div class="panel">
-        <h2>진행 중 배치</h2>
-        <div id="cur-batch"></div>
-        <div id="batch-error" class="error"></div>
+      <p class="hint flow-hint">수거 배치 ─ 카메라 선별 ─▶ 오염 / 비오염 저장함 ─ 임계치 도달 ─▶ 세척 배치 ─▶ 세척조</p>
+
+      <div class="two-col">
+        <div class="panel">
+          <h2>선별 중 수거 배치</h2>
+          <div id="cur-lot"></div>
+          <div id="err-lot" class="error"></div>
+        </div>
+        <div class="panel">
+          <h2>선별 저장함</h2>
+          <p class="hint">임계치에 도달하면 세척 배치로 자동으로 묶입니다. 임계치 전이라도 "지금 묶기"로 묶을 수 있습니다.</p>
+          <div id="bins" class="bins"></div>
+          <div id="err-bins" class="error"></div>
+        </div>
       </div>
 
       <div class="panel">
-        <h2>배치 목록</h2>
+        <h2>세척 중 배치</h2>
+        <div id="cur-wash"></div>
+        <div id="err-wash" class="error"></div>
+      </div>
+
+      <div class="panel">
+        <h2>세척 배치 목록</h2>
+        <div class="table-wrap">
+          <table class="list">
+            <thead><tr><th>세척 배치</th><th>상태</th><th>구분</th><th>병 수</th><th>출처 수거 배치(병 수)</th><th>레시피</th><th>묶은 시각</th><th>세척 시작</th><th>세척 종료</th><th></th></tr></thead>
+            <tbody id="wash-list"></tbody>
+          </table>
+        </div>
+        <div id="err-washlist" class="error"></div>
+      </div>
+
+      <div class="panel">
+        <h2>수거 배치 목록</h2>
         <div class="new-batch">
-          <input id="new-note" type="text" placeholder="메모 (선택, 예: 투명 PET 1톤)">
-          <button id="btn-new-batch" class="primary">새 배치 만들기</button>
+          <input id="new-note" type="text" placeholder="메모 (선택, 예: ○○동 수거분 1톤)">
+          <button id="btn-new-lot" class="primary">새 수거 배치 만들기</button>
         </div>
         <div class="table-wrap">
           <table class="list">
-            <thead><tr><th>배치</th><th>상태</th><th>메모</th><th>오염/비오염</th><th>오염 비율</th><th>제안 등급</th><th>확정 등급</th><th>시작</th><th>종료</th><th></th></tr></thead>
-            <tbody id="batch-list"></tbody>
+            <thead><tr><th>수거 배치</th><th>상태</th><th>메모</th><th>오염/비오염</th><th>오염 비율</th><th>선별 시작</th><th>선별 완료</th><th></th></tr></thead>
+            <tbody id="lot-list"></tbody>
           </table>
         </div>
+        <div id="err-lotlist" class="error"></div>
       </div>
     </section>
+
     <!-- 세척 제어 -->
     <section id="tab-control" class="page">
       <div class="panel">
@@ -125,7 +156,7 @@
         <h2>최근 결정 이력</h2>
         <div class="table-wrap">
           <table class="list">
-            <thead><tr><th>시각</th><th>배치</th><th>등급</th><th>당시 추천</th><th>결정</th><th>보낸 값 (농도/온도/시간)</th></tr></thead>
+            <thead><tr><th>시각</th><th>세척 배치</th><th>레시피</th><th>당시 추천</th><th>결정</th><th>보낸 값 (농도/온도/시간)</th></tr></thead>
             <tbody id="decision-list"></tbody>
           </table>
         </div>
@@ -134,12 +165,12 @@
     <!-- 이력 -->
     <section id="tab-history" class="page">
       <div class="panel">
-        <h2>배치 이력</h2>
+        <h2>세척 배치 이력</h2>
         <div class="btn-row" style="margin:0 0 12px"><a class="button primary" href="/api/history.csv">CSV 내보내기</a></div>
         <div class="table-wrap">
           <table class="list">
             <thead><tr>
-              <th>배치</th><th>종료</th><th>오염 비율</th><th>등급(제안→확정)</th>
+              <th>세척 배치</th><th>종료</th><th>구분·병 수</th><th>출처 수거 배치(병 수)</th><th>레시피</th>
               <th>적용 조건</th><th>평균 농도</th><th>평균 온도</th><th>탁도 평균/최대</th>
               <th>약품 투입</th><th>히터 가동</th><th></th>
             </tr></thead>
@@ -152,24 +183,23 @@
     <!-- 설정 -->
     <section id="tab-settings" class="page">
       <div class="panel">
-        <h2>등급별 레시피</h2>
+        <h2>세척 레시피</h2>
         <div class="table-wrap">
           <table class="list form-table">
-            <thead><tr><th>등급</th><th>이름</th><th>약품 농도(%)</th><th>온도(°C)</th><th>세척 시간(분)</th><th>기대 농도 감소(%p/분)</th></tr></thead>
-            <tbody id="set-grades"></tbody>
+            <thead><tr><th>구분</th><th>이름</th><th>약품 농도(%)</th><th>온도(°C)</th><th>세척 시간(분)</th><th>기대 농도 감소(%p/분)</th></tr></thead>
+            <tbody id="set-recipes"></tbody>
           </table>
         </div>
       </div>
       <div class="panel">
         <h2>임계값</h2>
         <div class="form-grid">
-          <label>등급 1 시작 오염 비율(%)<input type="number" step="1" id="set-t0"></label>
-          <label>등급 2 시작 오염 비율(%)<input type="number" step="1" id="set-t1"></label>
-          <label>등급 3 시작 오염 비율(%)<input type="number" step="1" id="set-t2"></label>
+          <label>오염 저장함 임계치(병)<input type="number" step="1" min="1" id="set-bin-c"></label>
+          <label>비오염 저장함 임계치(병)<input type="number" step="1" min="1" id="set-bin-n"></label>
           <label>농도 허용오차(%p)<input type="number" step="0.05" id="set-tol-c"></label>
           <label>온도 허용오차(°C)<input type="number" step="0.5" id="set-tol-t"></label>
           <label>세척수 교체 탁도(NTU)<input type="number" step="1" id="set-turb"></label>
-          <label>등급 상향 검토 배수(기대 감소 속도의 몇 배)<input type="number" step="0.1" id="set-decay"></label>
+          <label>오염 의심 경고 배수(기대 감소 속도의 몇 배)<input type="number" step="0.1" id="set-decay"></label>
         </div>
       </div>
       <div class="panel">

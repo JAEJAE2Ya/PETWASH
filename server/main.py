@@ -1,5 +1,11 @@
 """FastAPI 서버: MQTT 수신 → InfluxDB 저장 → WebSocket으로 브라우저에 실시간 전달
 
+배치는 두 단계로 관리한다.
+  수거 배치(L…) ─카메라 선별─▶ 오염/비오염 저장함 ─임계치 도달─▶ 세척 배치(W…) ─세척─▶ 이력
+  - 수거 배치: 수거된 순서대로 만든 단위. 선별까지만 쓴다.
+  - 세척 배치: 저장함에 모인 병을 묶은 단위. 세척 조건(레시피)·목표값·요약은 이 단위로 관리한다.
+선별(카메라)과 세척(세척조)은 다른 설비이므로 동시에 진행할 수 있다.
+
 실행 (PET 폴더에서):  .venv\\Scripts\\python -m uvicorn server.main:app --port 8000
 """
 import asyncio
@@ -25,6 +31,8 @@ from .recommend import DecayTracker, recommend
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("server")
 
+Stream = Literal["contaminated", "clean"]
+
 
 class WsManager:
     """접속한 브라우저(WebSocket) 목록을 관리하고 메시지를 한꺼번에 보낸다"""
@@ -46,11 +54,13 @@ state = {
     "device_status": None,  # 마지막 장치 상태(하트비트)
     "device_online": False,
     "last_setpoint": None,  # 마지막으로 보낸 목표값 + 장치 적용 결과
-    "batch": None,          # 진행 중인 배치 (한 번에 1개)
+    "lot": None,            # 선별 중인 수거 배치 (카메라가 1대이므로 한 번에 1개)
+    "bins": {s: 0 for s in config.STREAMS},  # 선별 저장함에 지금 모여 있는 병 수
+    "wash": None,           # 세척 중인 세척 배치 (세척조가 1개이므로 한 번에 1개)
     "recommendation": None, # 현재 추천 조치
 }
 decay_tracker = DecayTracker()
-batch_lock = threading.Lock()  # 카메라 집계(MQTT 스레드)와 웹 요청이 동시에 배치를 바꾸지 않도록
+batch_lock = threading.Lock()  # 카메라 집계(MQTT 스레드)와 웹 요청이 동시에 배치·저장함을 바꾸지 않도록
 last_heartbeat = 0.0
 
 # 장치 시간 시계: 시연용 가속(배속) 중에는 실제 시간보다 빨리 흐른다.
@@ -88,12 +98,19 @@ def on_mqtt_message(topic: str, payload: dict):
         last_heartbeat = time.time()
         state["device_status"] = payload
         check_setpoint_result(payload)
+        check_lot_done(payload)
         push({"type": "device_status", "data": payload})
         update_recommendation()  # 장치 적용 여부가 바뀌면 추천 화면도 바로 갱신
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def new_id(letter: str, table: str, column: str) -> str:
+    """배치 번호: 종류 글자 + 오늘 날짜 + 일련번호 (수거 배치 L20261119-001, 세척 배치 W20261119-001)"""
+    prefix = letter + datetime.now().strftime("%Y%m%d") + "-"
+    return f"{prefix}{db.count_with_prefix(table, column, prefix) + 1:03d}"
 
 
 def check_setpoint_result(status: dict):
@@ -110,78 +127,150 @@ def check_setpoint_result(status: dict):
     push({"type": "setpoint", "data": sp})
 
 
-# ---------------- 배치 ----------------
+# ---------------- 수거 배치 (선별) ----------------
 
-def batch_view(b: dict | None) -> dict | None:
-    """DB 배치 행에 화면에 필요한 값(총 개수, 오염 비율, 제안 근거)을 덧붙인다"""
+def lot_view(lot: dict | None) -> dict | None:
+    """DB 수거 배치 행에 화면에 필요한 값(판정 합계, 오염 비율)을 덧붙인다"""
+    if lot is None:
+        return None
+    lot = dict(lot)
+    total = lot["contaminated_n"] + lot["clean_n"]
+    lot["total_n"] = total
+    lot["ratio_pct"] = round(lot["contaminated_n"] / total * 100, 1) if total else None
+    return lot
+
+
+def count_camera_result(msg: dict):
+    """카메라 판정 1건 = 병 1개가 선별 게이트를 지나 저장함으로 들어감.
+    수거 배치 집계와 저장함에 더하고, 저장함이 임계치에 도달하면 세척 배치로 묶는다."""
+    stream = "contaminated" if msg.get("label") == "contaminated" else "clean"
+    lot_id = msg.get("batch_id")  # 카메라 토픽의 batch_id = 수거 배치 번호
+    with batch_lock:
+        lot = state["lot"]
+        current = lot is not None and lot["lot_id"] == lot_id
+        if not current and (not lot_id or db.get_lot(lot_id) is None):
+            return  # 모르는 수거 배치는 집계하지 않음 (InfluxDB에는 저장됨)
+        db.record_bottle(lot_id, stream)
+        state["bins"][stream] += 1
+        if current:
+            lot[f"{stream}_n"] += 1
+            state["lot"] = lot = lot_view(lot)
+        made = check_bins()
+    if current:
+        push({"type": "lot", "data": lot})
+    push({"type": "bins", "data": bins_payload()})
+    if made:
+        push({"type": "wash_batches"})
+
+
+def finish_lot(lot_id: str, reason: str) -> bool:
+    """수거 배치를 선별 완료로 바꾼다"""
+    with batch_lock:
+        lot = db.get_lot(lot_id)
+        if lot is None or lot["status"] != "선별 중":
+            return False
+        db.update_lot(lot_id, status="선별 완료", ended_at=now_iso())
+        if state["lot"] and state["lot"]["lot_id"] == lot_id:
+            state["lot"] = None
+    push({"type": "lot", "data": None})
+    push({"type": "lots"})
+    log.info("수거 배치 선별 완료: %s (%s)", lot_id, reason)
+    return True
+
+
+def check_lot_done(status: dict):
+    """장치가 수거 배치의 병을 모두 판정했다고 알리면(남은 병 0) 선별 완료로 바꾼다"""
+    lot = state["lot"]
+    if (lot and lot["total_n"] > 0 and status.get("lot_id") == lot["lot_id"]
+            and status.get("lot_remaining") == 0):
+        finish_lot(lot["lot_id"], "장치 판정 완료")
+
+
+# ---------------- 선별 저장함 ----------------
+
+def bins_payload() -> dict:
+    """저장함별 병 수와 임계치 (화면 표시용)"""
+    thresholds = config.load_recipes()["bin_threshold"]
+    return {s: {"n": state["bins"][s], "threshold": thresholds[s]} for s in config.STREAMS}
+
+
+def bundle(stream: str, created_by: str) -> dict | None:
+    """저장함의 병을 전부 세척 배치 1개로 묶는다 (호출하는 쪽에서 batch_lock을 잡고 있어야 함)"""
+    batch_id = new_id("W", "wash_batches", "batch_id")
+    b = db.bundle_bin(stream, batch_id, now_iso(), created_by)
     if b is None:
         return None
-    b = dict(b)
-    total = b["contaminated_n"] + b["clean_n"]
-    b["total_n"] = total
-    b["ratio_pct"] = round(b["contaminated_n"] / total * 100, 1) if total else None
-    b["suggest_reason"] = None
-    if total:
-        thresholds = config.load_recipes()["grade_thresholds_pct"]
-        b["suggested_grade"], b["suggest_reason"] = config.suggest_grade(b["ratio_pct"], thresholds)
+    state["bins"][stream] = 0
+    # 장치: 찬 저장함을 이 세척 배치로 표시해 빼 두고 빈 저장함으로 바꾼다
+    if mqtt_bridge.connected:
+        mqtt_bridge.publish(config.TOPIC_BATCH, {
+            "batch_id": batch_id, "action": "bundle", "stream": stream, "count": b["bottle_n"], "ts": now_iso(),
+        })
+    log.info("세척 배치 생성: %s (%s 저장함 %d병, %s)", batch_id, config.STREAM_NAMES[stream], b["bottle_n"],
+             "임계치 도달" if created_by == "auto" else "작업자 지금 묶기")
     return b
 
 
-def set_current_batch(b: dict | None):
-    state["batch"] = batch_view(b)
-    push({"type": "batch", "data": state["batch"]})
+def check_bins() -> list[dict]:
+    """임계치에 도달한 저장함을 세척 배치로 묶는다 (호출하는 쪽에서 batch_lock을 잡고 있어야 함)"""
+    thresholds = config.load_recipes()["bin_threshold"]
+    made = []
+    for stream in config.STREAMS:
+        if state["bins"][stream] >= thresholds[stream]:
+            b = bundle(stream, "auto")
+            if b:
+                made.append(b)
+    return made
+
+
+# ---------------- 세척 배치 ----------------
+
+def wash_view(b: dict | None) -> dict | None:
+    """DB 세척 배치 행에 출처 수거 배치 목록을 붙인다"""
+    if b is None:
+        return None
+    b = dict(b)
+    b["sources"] = db.wash_sources(b["batch_id"])
+    return b
+
+
+def set_current_wash(b: dict | None):
+    state["wash"] = wash_view(b)
+    push({"type": "wash", "data": state["wash"]})
     if b is None:
         decay_tracker.reset()
     update_recommendation()
 
 
-def count_camera_result(msg: dict):
-    """카메라 판정 1건을 진행 중 배치에 집계하고 제안 등급을 다시 계산"""
-    with batch_lock:
-        b = state["batch"]
-        if b is None or msg.get("batch_id") != b["batch_id"]:
-            return  # 진행 중 배치가 아니면 집계하지 않음 (InfluxDB에는 저장됨)
-        key = "contaminated_n" if msg.get("label") == "contaminated" else "clean_n"
-        b[key] += 1
-        b = batch_view(b)
-        db.update_batch(b["batch_id"], contaminated_n=b["contaminated_n"], clean_n=b["clean_n"],
-                        suggested_grade=b["suggested_grade"])
-        state["batch"] = b
-    push({"type": "batch", "data": b})
-
-
 # ---------------- 추천 ----------------
 
 def track_decay(sensor: dict):
-    """장치가 현재 배치를 세척 중일 때만 농도 감소 속도 계산용 데이터를 모은다"""
-    b, st = state["batch"], state["device_status"]
-    if b and st and st.get("state") == "세척 중" and st.get("batch_id") == b["batch_id"]:
-        decay_tracker.add(b["batch_id"], device_clock, sensor["concentration_pct"], sensor["pump_on"])
+    """장치가 현재 세척 배치를 세척 중일 때만 농도 감소 속도 계산용 데이터를 모은다"""
+    w, st = state["wash"], state["device_status"]
+    if w and st and st.get("state") == "세척 중" and st.get("batch_id") == w["batch_id"]:
+        decay_tracker.add(w["batch_id"], device_clock, sensor["concentration_pct"], sensor["pump_on"])
 
 
 def compute_recommendation() -> dict:
-    b = state["batch"]
-    if b is None:
-        return {"available": False, "message": "진행 중인 배치가 없습니다."}
-    if b["final_grade"] is None:
-        hint = f" (시스템 제안 등급: {b['suggested_grade']})" if b["suggested_grade"] is not None else ""
-        return {"available": False, "message": "배치 관리 화면에서 등급을 먼저 확정하세요." + hint}
+    w = state["wash"]
+    if w is None:
+        return {"available": False, "message": "세척 중인 배치가 없습니다. 배치 관리에서 대기 중인 세척 배치를 시작하세요."}
     st = state["device_status"] or {}
-    if st.get("state") == "세척 완료" and st.get("batch_id") == b["batch_id"]:
-        return {"available": False, "message": "설정한 세척 시간이 끝났습니다. 배치 관리에서 배치를 종료하세요."}
+    if st.get("state") == "세척 완료" and st.get("batch_id") == w["batch_id"]:
+        return {"available": False, "message": "설정한 세척 시간이 끝났습니다. 배치 관리에서 세척 배치를 종료하세요."}
     recipes = config.load_recipes()
-    r = recipes["grades"][b["final_grade"]]
-    # 장치가 이 배치에 이 레시피 목표값을 이미 적용해서 세척 중인지 확인
-    st = state["device_status"] or {}
+    r = recipes["recipes"][w["recipe"]]
+    # 장치가 이 세척 배치에 이 레시피 목표값을 이미 적용해서 세척 중인지 확인
     ap = st.get("applied") or {}
     applied = (
-        state["device_online"] and st.get("state") == "세척 중" and ap.get("batch_id") == b["batch_id"]
+        state["device_online"] and st.get("state") == "세척 중" and ap.get("batch_id") == w["batch_id"]
         and float(ap.get("target_concentration_pct", -1)) == r["concentration_pct"]
         and float(ap.get("target_temp_c", -1)) == r["temp_c"]
         and float(ap.get("wash_time_min", -1)) == r["wash_time_min"]
     )
-    rec = recommend(b["final_grade"], recipes, state["sensor"], decay_tracker.rate(), applied)
-    rec["batch_id"] = b["batch_id"]
+    rec = recommend(w["recipe"], recipes, state["sensor"], decay_tracker.rate(), applied)
+    rec["batch_id"] = w["batch_id"]
+    rec["stream"] = w["stream"]
     return rec
 
 
@@ -197,8 +286,8 @@ def log_decision(decision: str, applied: dict | None):
     needed = [i["action"] for i in rec.get("items", []) if i["level"] != "ok"]
     db.insert_decision({
         "ts": now_iso(),
-        "batch_id": state["batch"]["batch_id"] if state["batch"] else None,
-        "grade": rec.get("grade"),
+        "batch_id": state["wash"]["batch_id"] if state["wash"] else None,
+        "recipe": rec.get("recipe"),
         "recommended": " / ".join(needed) if needed else "유지",
         "proposed_concentration_pct": target.get("target_concentration_pct"),
         "proposed_temp_c": target.get("target_temp_c"),
@@ -237,7 +326,10 @@ async def lifespan(app: FastAPI):
     db.init_db()
     recent = db.recent_setpoints(1)
     state["last_setpoint"] = recent[0] if recent else None
-    state["batch"] = batch_view(db.running_batch())  # 서버 재시작 시 진행 중 배치 복원
+    # 서버 재시작 시 선별 중 수거 배치, 저장함, 세척 중 배치 복원
+    state["lot"] = lot_view(db.sorting_lot())
+    state["bins"] = db.bin_counts()
+    state["wash"] = wash_view(db.washing_batch())
     state["recommendation"] = compute_recommendation()
     mqtt_bridge.start()
     task = asyncio.create_task(watch_heartbeat())
@@ -252,6 +344,7 @@ app = FastAPI(title="PETWASH", lifespan=lifespan)
 def snapshot() -> dict:
     return {
         **state,
+        "bins": bins_payload(),
         "mqtt_connected": mqtt_bridge.connected,
         "influx_error": influx.last_error,
         "recipes": config.load_recipes(),
@@ -267,6 +360,13 @@ def get_state():
 def sensor_history(minutes: int = 10):
     return influx.recent_sensor(minutes)
 
+
+def require_mqtt():
+    if not mqtt_bridge.connected:
+        raise HTTPException(status_code=503, detail=["MQTT 브로커에 연결되지 않았습니다"])
+
+
+# ---------------- 목표값·추천 ----------------
 
 class SetpointIn(BaseModel):
     batch_id: str | None = None
@@ -288,8 +388,8 @@ def send_setpoint(sp_in: SetpointIn) -> dict:
         raise HTTPException(status_code=503, detail=["MQTT 브로커에 연결되지 않아 보낼 수 없습니다"])
 
     sp = sp_in.model_dump()
-    # 배치를 지정하지 않으면 진행 중 배치로 보낸다 (없으면 "수동")
-    sp["batch_id"] = sp["batch_id"] or (state["batch"]["batch_id"] if state["batch"] else "수동")
+    # 배치를 지정하지 않으면 세척 중인 세척 배치로 보낸다 (없으면 "수동")
+    sp["batch_id"] = sp["batch_id"] or (state["wash"]["batch_id"] if state["wash"] else "수동")
     sp["issued_at"] = now_iso()  # 장치가 회신할 때 이 값으로 어떤 명령인지 구분
     mqtt_bridge.publish(config.TOPIC_SETPOINT, sp)
     db.insert_setpoint(sp)
@@ -314,7 +414,7 @@ def get_recommendation():
 
 @app.post("/api/recommendation/approve")
 def approve_recommendation():
-    """추천 목표값(등급 레시피)을 승인해서 장치로 보낸다"""
+    """추천 목표값(세척 배치 레시피)을 승인해서 장치로 보낸다"""
     rec = compute_recommendation()
     if not rec.get("available"):
         raise HTTPException(status_code=409, detail=[rec.get("message", "추천이 없습니다")])
@@ -342,7 +442,7 @@ def replace_water():
     """세척수 교체 지시 (시뮬레이터는 농도·탁도·온도를 새 물 상태로 되돌림)"""
     require_mqtt()
     mqtt_bridge.publish(config.TOPIC_BATCH, {
-        "batch_id": state["batch"]["batch_id"] if state["batch"] else None,
+        "batch_id": state["wash"]["batch_id"] if state["wash"] else None,
         "action": "replace_water", "ts": now_iso(),
     })
     decay_tracker.reset()  # 새 물이므로 감소 속도도 다시 계산
@@ -360,91 +460,149 @@ def get_setpoints(limit: int = 10):
     return db.recent_setpoints(limit)
 
 
-class BatchIn(BaseModel):
+# ---------------- 수거 배치 API ----------------
+
+class LotIn(BaseModel):
     note: str = ""
 
 
-class GradeIn(BaseModel):
-    grade: int
+def get_lot_or_404(lot_id: str) -> dict:
+    lot = db.get_lot(lot_id)
+    if lot is None:
+        raise HTTPException(status_code=404, detail=["수거 배치를 찾을 수 없습니다"])
+    return lot
 
 
-def require_mqtt():
-    if not mqtt_bridge.connected:
-        raise HTTPException(status_code=503, detail=["MQTT 브로커에 연결되지 않았습니다"])
+@app.get("/api/lots")
+def get_lots(limit: int = 30):
+    return [lot_view(lot) for lot in db.list_lots(limit)]
 
 
-def get_batch_or_404(batch_id: str) -> dict:
-    b = db.get_batch(batch_id)
+@app.post("/api/lots")
+def create_lot(body: LotIn):
+    lot_id = new_id("L", "lots", "lot_id")
+    lot = db.create_lot(lot_id, now_iso(), body.note)
+    push({"type": "lots"})
+    return lot_view(lot)
+
+
+@app.post("/api/lots/{lot_id}/start")
+def start_lot(lot_id: str):
+    """수거 배치 선별 시작: 장치가 카메라 판정을 시작하고 병을 저장함으로 보낸다"""
+    require_mqtt()
+    with batch_lock:
+        lot = get_lot_or_404(lot_id)
+        if lot["status"] != "생성됨":
+            raise HTTPException(status_code=409, detail=[f"'{lot['status']}' 상태의 수거 배치는 시작할 수 없습니다"])
+        if state["lot"] is not None:
+            raise HTTPException(status_code=409, detail=[f"선별 중인 수거 배치({state['lot']['lot_id']})를 먼저 끝내세요"])
+        db.update_lot(lot_id, status="선별 중", started_at=now_iso())
+        state["lot"] = lot_view(db.get_lot(lot_id))
+    mqtt_bridge.publish(config.TOPIC_BATCH, {"batch_id": lot_id, "action": "sort_start", "ts": now_iso()})
+    push({"type": "lot", "data": state["lot"]})
+    push({"type": "lots"})
+    log.info("수거 배치 선별 시작: %s", lot_id)
+    return state["lot"]
+
+
+@app.post("/api/lots/{lot_id}/end")
+def end_lot(lot_id: str):
+    """선별 수동 종료 (병이 다 떨어졌거나 중간에 멈춰야 할 때)"""
+    lot = get_lot_or_404(lot_id)
+    if lot["status"] != "선별 중":
+        raise HTTPException(status_code=409, detail=["선별 중인 수거 배치만 종료할 수 있습니다"])
+    if mqtt_bridge.connected:
+        mqtt_bridge.publish(config.TOPIC_BATCH, {"batch_id": lot_id, "action": "sort_stop", "ts": now_iso()})
+    finish_lot(lot_id, "작업자 종료")
+    return lot_view(db.get_lot(lot_id))
+
+
+# ---------------- 저장함·세척 배치 API ----------------
+
+class RecipeIn(BaseModel):
+    recipe: Stream
+
+
+def get_wash_or_404(batch_id: str) -> dict:
+    b = db.get_wash_batch(batch_id)
     if b is None:
-        raise HTTPException(status_code=404, detail=["배치를 찾을 수 없습니다"])
+        raise HTTPException(status_code=404, detail=["세척 배치를 찾을 수 없습니다"])
     return b
 
 
-@app.get("/api/batches")
-def get_batches(limit: int = 30):
-    return [batch_view(b) for b in db.list_batches(limit)]
+@app.post("/api/bins/{stream}/bundle")
+def bundle_now(stream: Stream):
+    """임계치에 못 미쳐도 지금 저장함의 병을 세척 배치로 묶는다 (작업 마감 때 남은 병 등)"""
+    with batch_lock:
+        b = bundle(stream, "operator")
+    if b is None:
+        raise HTTPException(status_code=409, detail=[f"{config.STREAM_NAMES[stream]} 저장함이 비어 있습니다"])
+    push({"type": "bins", "data": bins_payload()})
+    push({"type": "wash_batches"})
+    return b
 
 
-@app.post("/api/batches")
-def create_batch(body: BatchIn):
-    # 배치 번호: B + 오늘 날짜 + 일련번호 (예: B20261118-001)
-    prefix = "B" + datetime.now().strftime("%Y%m%d") + "-"
-    batch_id = f"{prefix}{db.count_batches_with_prefix(prefix) + 1:03d}"
-    b = db.create_batch(batch_id, now_iso(), body.note)
-    push({"type": "batch", "data": state["batch"]})  # 목록 갱신 알림
-    return batch_view(b)
+@app.get("/api/wash_batches")
+def get_wash_batches(limit: int = 50):
+    return db.list_wash_batches(limit)
 
 
-@app.post("/api/batches/{batch_id}/start")
-def start_batch(batch_id: str):
+@app.post("/api/wash_batches/{batch_id}/start")
+def start_wash(batch_id: str):
+    """세척 배치를 세척조에 넣고 세척을 시작한다 (목표값은 추천 승인으로 따로 보냄)"""
     require_mqtt()
     with batch_lock:
-        b = get_batch_or_404(batch_id)
-        if b["status"] != "생성됨":
-            raise HTTPException(status_code=409, detail=[f"'{b['status']}' 상태의 배치는 시작할 수 없습니다"])
-        if state["batch"] is not None:
-            raise HTTPException(status_code=409, detail=[f"진행 중인 배치({state['batch']['batch_id']})를 먼저 종료하세요"])
-        db.update_batch(batch_id, status="진행 중", started_at=now_iso())
-        set_current_batch(db.get_batch(batch_id))
-    # 장치에 배치 시작 알림 → 카메라 판정 시작
-    mqtt_bridge.publish(config.TOPIC_BATCH, {"batch_id": batch_id, "action": "start", "ts": now_iso()})
-    log.info("배치 시작: %s", batch_id)
-    return state["batch"]
+        b = get_wash_or_404(batch_id)
+        if b["status"] != "대기":
+            raise HTTPException(status_code=409, detail=[f"'{b['status']}' 상태의 세척 배치는 시작할 수 없습니다"])
+        if state["wash"] is not None:
+            raise HTTPException(status_code=409, detail=[f"세척 중인 배치({state['wash']['batch_id']})를 먼저 종료하세요"])
+        db.update_wash_batch(batch_id, status="세척 중", started_at=now_iso())
+        set_current_wash(db.get_wash_batch(batch_id))
+    mqtt_bridge.publish(config.TOPIC_BATCH, {
+        "batch_id": batch_id, "action": "wash_start", "stream": b["stream"], "count": b["bottle_n"], "ts": now_iso(),
+    })
+    push({"type": "wash_batches"})
+    log.info("세척 배치 시작: %s", batch_id)
+    return state["wash"]
 
 
-@app.post("/api/batches/{batch_id}/grade")
-def set_grade(batch_id: str, body: GradeIn):
-    if body.grade not in config.load_recipes()["grades"]:
-        raise HTTPException(status_code=400, detail=["등급은 0~3 중 하나여야 합니다"])
+@app.post("/api/wash_batches/{batch_id}/recipe")
+def set_wash_recipe(batch_id: str, body: RecipeIn):
+    """세척 배치에 적용할 레시피를 바꾼다 (예: 비오염 배치인데 약품 소모가 빨라 선별 오류가 의심될 때)"""
     with batch_lock:
-        b = get_batch_or_404(batch_id)
-        if b["status"] != "진행 중":
-            raise HTTPException(status_code=409, detail=["진행 중인 배치만 등급을 입력할 수 있습니다"])
-        db.update_batch(batch_id, final_grade=body.grade, graded_at=now_iso())
-        set_current_batch(db.get_batch(batch_id))
-    log.info("배치 %s 등급 확정: %d", batch_id, body.grade)
-    return state["batch"]
+        b = get_wash_or_404(batch_id)
+        if b["status"] == "종료":
+            raise HTTPException(status_code=409, detail=["종료된 세척 배치는 레시피를 바꿀 수 없습니다"])
+        db.update_wash_batch(batch_id, recipe=body.recipe)
+        if state["wash"] and state["wash"]["batch_id"] == batch_id:
+            log_decision(f"레시피 변경 → {config.STREAM_NAMES[body.recipe]}", None)
+            set_current_wash(db.get_wash_batch(batch_id))
+    push({"type": "wash_batches"})
+    log.info("세척 배치 %s 레시피: %s", batch_id, body.recipe)
+    return wash_view(db.get_wash_batch(batch_id))
 
 
-@app.post("/api/batches/{batch_id}/end")
-def end_batch(batch_id: str):
+@app.post("/api/wash_batches/{batch_id}/end")
+def end_wash(batch_id: str):
     with batch_lock:
-        b = get_batch_or_404(batch_id)
-        if b["status"] != "진행 중":
-            raise HTTPException(status_code=409, detail=["진행 중인 배치만 종료할 수 있습니다"])
-        db.update_batch(batch_id, status="종료", ended_at=now_iso())
-        set_current_batch(None)
-    # 장치에 배치 종료 알림 → 펌프·히터 정지 (MQTT가 끊겨 있으면 알림만 생략)
+        b = get_wash_or_404(batch_id)
+        if b["status"] != "세척 중":
+            raise HTTPException(status_code=409, detail=["세척 중인 배치만 종료할 수 있습니다"])
+        db.update_wash_batch(batch_id, status="종료", ended_at=now_iso())
+        set_current_wash(None)
+    # 장치에 세척 종료 알림 → 펌프·히터 정지 (MQTT가 끊겨 있으면 알림만 생략)
     if mqtt_bridge.connected:
         mqtt_bridge.publish(config.TOPIC_BATCH, {"batch_id": batch_id, "action": "stop", "ts": now_iso()})
-    log.info("배치 종료: %s", batch_id)
+    log.info("세척 배치 종료: %s", batch_id)
     summarize_batch(batch_id)
-    return batch_view(db.get_batch(batch_id))
+    push({"type": "wash_batches"})
+    return db.get_wash_batch(batch_id)
 
 
 def summarize_batch(batch_id: str) -> dict:
-    """배치 요약을 계산해서 SQLite에 저장 (세척 구간 = 첫 목표값 적용 ~ 배치 종료)"""
-    b = db.get_batch(batch_id)
+    """세척 배치 요약을 계산해서 SQLite에 저장 (세척 구간 = 첫 목표값 적용 ~ 세척 종료)"""
+    b = db.get_wash_batch(batch_id)
     applied = db.applied_setpoints(batch_id)
     start = applied[0]["issued_at"] if applied else b["started_at"]
     end = b["ended_at"]
@@ -458,27 +616,27 @@ def summarize_batch(batch_id: str) -> dict:
     if stats:
         summary.update(stats)
     else:
-        log.warning("배치 %s: 요약할 센서 데이터가 없습니다", batch_id)
+        log.warning("세척 배치 %s: 요약할 센서 데이터가 없습니다", batch_id)
     db.save_summary(summary)
     push({"type": "history"})
     return summary
 
 
-@app.post("/api/batches/{batch_id}/summary")
+@app.post("/api/wash_batches/{batch_id}/summary")
 def recompute_summary(batch_id: str):
-    """종료된 배치의 요약을 다시 계산 (InfluxDB에 데이터가 남아 있을 때만 가능)"""
-    b = get_batch_or_404(batch_id)
+    """종료된 세척 배치의 요약을 다시 계산 (InfluxDB에 데이터가 남아 있을 때만 가능)"""
+    b = get_wash_or_404(batch_id)
     if b["status"] != "종료":
-        raise HTTPException(status_code=409, detail=["종료된 배치만 요약할 수 있습니다"])
+        raise HTTPException(status_code=409, detail=["종료된 세척 배치만 요약할 수 있습니다"])
     return summarize_batch(batch_id)
 
 
 # ---------------- 이력·CSV ----------------
 
 HISTORY_COLUMNS = [  # (키, CSV 머리글)
-    ("batch_id", "배치"), ("note", "메모"), ("started_at", "시작"), ("ended_at", "종료"),
-    ("contaminated_n", "오염 판정 수"), ("clean_n", "비오염 판정 수"), ("ratio_pct", "오염 비율(%)"),
-    ("suggested_grade", "제안 등급"), ("final_grade", "확정 등급"),
+    ("batch_id", "세척 배치"), ("stream_name", "선별 구분"), ("bottle_n", "병 수"),
+    ("sources", "출처 수거 배치(병 수)"), ("created_by_name", "묶은 방식"), ("created_at", "묶은 시각"),
+    ("started_at", "세척 시작"), ("ended_at", "세척 종료"), ("recipe_name", "레시피"),
     ("applied_concentration_pct", "적용 농도(%)"), ("applied_temp_c", "적용 온도(°C)"),
     ("applied_wash_time_min", "적용 세척 시간(분)"), ("setpoint_count", "목표값 적용 횟수"),
     ("avg_concentration_pct", "평균 농도(%)"), ("avg_temp_c", "평균 온도(°C)"),
@@ -488,10 +646,12 @@ HISTORY_COLUMNS = [  # (키, CSV 머리글)
 
 
 def history_rows() -> list[dict]:
+    recipes = config.load_recipes()["recipes"]
     rows = []
     for r in db.history():
-        total = r["contaminated_n"] + r["clean_n"]
-        r["ratio_pct"] = round(r["contaminated_n"] / total * 100, 1) if total else None
+        r["stream_name"] = config.STREAM_NAMES.get(r["stream"], r["stream"])
+        r["recipe_name"] = recipes.get(r["recipe"], {}).get("name", r["recipe"])
+        r["created_by_name"] = "임계치 도달" if r["created_by"] == "auto" else "작업자 지금 묶기"
         rows.append(r)
     return rows
 
@@ -516,7 +676,7 @@ def get_history_csv():
 
 # ---------------- 설정 (레시피·임계값) ----------------
 
-class GradeRecipe(BaseModel):
+class RecipeModel(BaseModel):
     name: str = Field(min_length=1)
     concentration_pct: float
     temp_c: float
@@ -525,8 +685,8 @@ class GradeRecipe(BaseModel):
 
 
 class SettingsIn(BaseModel):
-    grades: dict[int, GradeRecipe]
-    grade_thresholds_pct: list[float]
+    recipes: dict[str, RecipeModel]
+    bin_threshold: dict[str, int]
     tolerance: dict[str, float]
     turbidity_limit_ntu: float = Field(gt=0)
     decay_alert_factor: float = Field(gt=1)
@@ -541,31 +701,35 @@ def get_settings():
 def put_settings(body: SettingsIn):
     current = config.load_recipes()
     errors = []
-    if sorted(body.grades) != [0, 1, 2, 3]:
-        errors.append("등급 0~3의 레시피가 모두 있어야 합니다")
-    for g, r in body.grades.items():
+    if set(body.recipes) != set(config.STREAMS):
+        errors.append("오염·비오염 레시피가 모두 있어야 합니다")
+    for key, r in body.recipes.items():
         # 레시피도 안전 한계 안이어야 한다 (안전 한계 자체는 장치와 맞춰야 하므로 화면에서 바꾸지 않음)
-        errors += [f"등급 {g}: {e}" for e in
+        name = config.STREAM_NAMES.get(key, key)
+        errors += [f"{name} 레시피: {e}" for e in
                    config.check_setpoint(r.concentration_pct, r.temp_c, r.wash_time_min, current["safety"])]
-    t = body.grade_thresholds_pct
-    if len(t) != 3 or not (0 < t[0] < t[1] < t[2] < 100):
-        errors.append("등급 기준은 0 < 기준1 < 기준2 < 기준3 < 100 이어야 합니다")
+    t = body.bin_threshold
+    if set(t) != set(config.STREAMS) or not all(1 <= v <= 10000 for v in t.values()):
+        errors.append("저장함 임계치는 오염·비오염 모두 1~10000병이어야 합니다")
     if set(body.tolerance) != {"concentration_pct", "temp_c"} or min(body.tolerance.values()) <= 0:
         errors.append("허용오차(농도·온도)는 0보다 커야 합니다")
     if errors:
         raise HTTPException(status_code=400, detail=errors)
 
     data = body.model_dump()
-    data["grades"] = {g: data["grades"][g] for g in sorted(data["grades"])}
+    data["recipes"] = {k: data["recipes"][k] for k in config.STREAMS}
+    data["bin_threshold"] = {k: data["bin_threshold"][k] for k in config.STREAMS}
     data["safety"] = current["safety"]
     config.save_recipes(data)
     log.info("설정 저장됨")
-    # 등급 제안·추천을 새 설정으로 다시 계산하고 브라우저에 알린다
+    # 임계치를 낮췄으면 이미 넘은 저장함을 바로 묶고, 추천을 새 설정으로 다시 계산한다
     with batch_lock:
-        if state["batch"]:
-            set_current_batch(db.get_batch(state["batch"]["batch_id"]))
+        made = check_bins()
     update_recommendation()
     push({"type": "recipes", "data": config.load_recipes()})
+    push({"type": "bins", "data": bins_payload()})
+    if made:
+        push({"type": "wash_batches"})
     return config.load_recipes()
 
 

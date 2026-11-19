@@ -2,6 +2,10 @@
 
 실행 (PET 폴더에서):  .venv\\Scripts\\python -m device.simulator
 
+장치 구성 (선별과 세척은 다른 설비라서 동시에 돌아간다)
+  카메라 → 선별 게이트 → 오염/비오염 저장함   (수거 배치 단위로 선별)
+  세척조 (펌프·히터·센서)                       (세척 배치 단위로 세척)
+
 시연용 가속: 웹 화면의 "(테스트) 10배 가속" 버튼 → petwash/control/sim 토픽으로 배속이 온다.
 장치 안의 시간(가열, 약품 소모, 세척 타이머, 카메라 판정)이 배속만큼 빨리 흐른다.
 실제 장치(라즈베리파이)는 이 토픽을 구독하지 않는다.
@@ -17,7 +21,7 @@ from datetime import datetime, timezone
 import paho.mqtt.client as mqtt
 
 from .controller import LocalController
-from .sensors import SimulatedCamera, SimulatedWashTank
+from .sensors import SimulatedCamera, SimulatedSorter, SimulatedWashTank
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s sim %(levelname)s %(message)s")
 log = logging.getLogger("sim")
@@ -35,9 +39,11 @@ TOPIC_SIM = "petwash/control/sim"  # 시연용 배속 (시뮬레이터 전용)
 # 아래 간격은 "장치 안의 시간" 기준. 10배속이면 실제로는 1/10 간격으로 일어난다.
 CONTROL_PERIOD_S = 2.0   # 센서 읽기 → 제어 → 센서 값 발행 주기
 BOTTLE_INTERVAL_S = 0.3  # 병 1개 판정 간격
-BOTTLES_PER_BATCH = 100
+BOTTLES_PER_LOT = 100    # 수거 배치 1개의 병 수
 STATUS_INTERVAL_S = 5.0  # 하트비트는 실제 시간 기준 (서버의 연결 끊김 판단과 맞춰야 함)
 ALLOWED_SPEEDS = (1, 10)
+# 저장함 기록이 없을 때(시뮬레이터를 다시 켠 경우 등) 세척조에 쓰는 숨겨진 오염 비율
+FALLBACK_RATIO = {"contaminated": 0.85, "clean": 0.1}
 
 
 def now_iso() -> str:
@@ -48,6 +54,7 @@ class Simulator:
     def __init__(self):
         self.tank = SimulatedWashTank()
         self.camera = SimulatedCamera()
+        self.sorter = SimulatedSorter()
         self.speed = 1          # 배속 (1 = 실제 시간)
         self.sim_now = 0.0      # 시뮬레이션 시계 (초). 배속만큼 빨리 흐른다
         self.ctrl = LocalController(clock=lambda: self.sim_now)
@@ -57,8 +64,10 @@ class Simulator:
         self.next_control = 0.0  # 다음 제어 단계 (장치 시각)
         self.next_bottle = 0.0   # 다음 병 판정 (장치 시각)
         self.inbox: queue.Queue = queue.Queue()  # MQTT 스레드 → 메인 루프로 명령 전달
-        self.batch_id = None
-        self.bottles_left = 0
+        self.lot_id = None          # 선별 중인(또는 마지막으로 선별한) 수거 배치
+        self.bottles_left = 0       # 이 수거 배치에서 아직 판정하지 않은 병 수
+        self.wash_batch_id = None   # 세척조에 들어 있는 세척 배치
+        self.staged = {}            # 세척 배치 번호 → 그 배치 병들의 실제 오염 여부 (찬 저장함을 빼 둔 것)
 
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="petwash-sim")
         self.client.on_connect = self._on_connect
@@ -86,17 +95,26 @@ class Simulator:
         if topic == TOPIC_SETPOINT:
             ok = self.ctrl.apply_setpoint(msg)
             if ok and msg.get("batch_id"):
-                self.batch_id = msg["batch_id"]  # 장치가 재시작돼도 목표값의 배치를 따라간다
+                self.wash_batch_id = msg["batch_id"]  # 장치가 재시작돼도 목표값의 세척 배치를 따라간다
             log.info("목표값 수신 %s → %s", msg, "적용" if ok else self.ctrl.message)
             self.publish_status()  # 적용 결과를 바로 회신
         elif topic == TOPIC_BATCH:
             action = msg.get("action")
-            if action == "start":
-                self.start_batch(msg["batch_id"])
-            elif action == "stop":
-                self.ctrl.stop("배치 종료")
-                self.batch_id = None
+            if action == "sort_start":
+                self.start_sort(msg["batch_id"])
+            elif action == "sort_stop":
                 self.bottles_left = 0
+                log.info("수거 배치 %s 선별 중단", self.lot_id)
+                self.publish_status()
+            elif action == "bundle":
+                taken = self.sorter.take(msg["stream"], int(msg["count"]))
+                self.staged[msg["batch_id"]] = taken
+                log.info("%s 저장함 %d병 → 세척 배치 %s (빈 저장함으로 교체)", msg["stream"], len(taken), msg["batch_id"])
+            elif action == "wash_start":
+                self.start_wash(msg["batch_id"], msg.get("stream"), int(msg.get("count") or 0))
+            elif action == "stop":
+                self.ctrl.stop("세척 배치 종료")
+                self.wash_batch_id = None
                 self.publish_status()
             elif action == "replace_water":
                 self.tank.replace_water()
@@ -108,22 +126,34 @@ class Simulator:
                 log.info("시연용 배속: x%d", speed)
                 self.publish_status()
 
-    def start_batch(self, batch_id):
-        # 이 배치의 "숨겨진 실제 오염도"를 랜덤으로 정한다 (서버는 카메라 판정으로만 추정)
+    def start_sort(self, lot_id):
+        # 이 수거 배치의 "숨겨진 실제 오염도"를 랜덤으로 정한다 (서버는 카메라 판정으로만 추정)
         ratio = random.uniform(0.0, 0.9)
-        self.batch_id = batch_id
-        self.tank.hidden_ratio = ratio
+        self.lot_id = lot_id
         self.camera.hidden_ratio = ratio
-        self.bottles_left = BOTTLES_PER_BATCH
-        self.ctrl.stop("새 배치: 카메라 판정 중")
-        log.info("배치 %s 시작, 숨겨진 오염 비율 %.0f%%", batch_id, ratio * 100)
+        self.bottles_left = BOTTLES_PER_LOT
+        log.info("수거 배치 %s 선별 시작, 숨겨진 오염 비율 %.0f%%", lot_id, ratio * 100)
+        self.publish_status()
+
+    def start_wash(self, batch_id, stream, count):
+        """세척 배치를 세척조에 넣는다. 세척조의 숨겨진 오염도 = 그 배치 병들의 실제 오염 비율"""
+        bottles = self.staged.pop(batch_id, None)
+        if bottles is None and stream in self.sorter.bins:  # 묶음 알림을 못 받았으면 지금 저장함에서 꺼낸다
+            bottles = self.sorter.take(stream, count)
+        ratio = sum(bottles) / len(bottles) if bottles else FALLBACK_RATIO.get(stream, 0.5)
+        self.wash_batch_id = batch_id
+        self.tank.hidden_ratio = ratio
+        self.ctrl.stop("세척 배치 투입: 목표값을 기다리는 중")
+        log.info("세척 배치 %s 투입 (%s %d병), 실제 오염 비율 %.0f%%",
+                 batch_id, stream, len(bottles or []), ratio * 100)
+        self.publish_status()
 
     def publish_status(self):
         sp = self.ctrl.setpoint
         remain = self.ctrl.remaining_s()
         self.publish(TOPIC_STATUS, {
             "ts": now_iso(),
-            "batch_id": self.batch_id,
+            "batch_id": self.wash_batch_id,  # 세척조에 들어 있는 세척 배치
             "state": self.ctrl.state,
             "message": self.ctrl.message,
             "applied": sp,  # 현재 적용 중인 목표값 (없으면 null)
@@ -131,6 +161,9 @@ class Simulator:
             "remaining_s": None if remain is None else round(remain),
             "pump_on": self.ctrl.pump_on,
             "heater_on": self.ctrl.heater_on,
+            "lot_id": self.lot_id,              # 선별 중인(또는 마지막) 수거 배치
+            "lot_remaining": self.bottles_left,  # 아직 판정하지 않은 병 수 (0이면 선별 끝)
+            "bins": {s: len(b) for s, b in self.sorter.bins.items()},  # 실제 저장함에 들어 있는 병 수
             "time_scale": self.speed,  # 시연용 배속 (실제 장치는 항상 1)
         })
 
@@ -149,13 +182,16 @@ class Simulator:
         })
 
     def publish_bottle(self):
+        """병 1개: 카메라 판정 → 선별 게이트가 저장함으로 보냄 → 판정 결과 발행"""
         label, conf = self.camera.classify()
+        self.sorter.route(label, truth=self.camera.last_truth)
         self.publish(TOPIC_CAMERA, {
-            "ts": now_iso(), "batch_id": self.batch_id, "label": label, "confidence": conf,
+            "ts": now_iso(), "batch_id": self.lot_id, "label": label, "confidence": conf,
         })
         self.bottles_left -= 1
         if self.bottles_left == 0:
-            log.info("카메라 판정 완료")
+            log.info("수거 배치 %s 선별 완료", self.lot_id)
+            self.publish_status()  # 서버가 선별 완료를 바로 알 수 있도록
 
     def tick(self, now: float):
         """메인 루프 한 바퀴. now = 실제 시각(time.time())"""
@@ -165,7 +201,11 @@ class Simulator:
         self.sim_now += (now - self.last_real) * self.speed
         self.last_real = now
         while not self.inbox.empty():
-            self.handle(*self.inbox.get())
+            topic, msg = self.inbox.get()
+            try:
+                self.handle(topic, msg)
+            except (KeyError, TypeError, ValueError) as e:
+                log.warning("명령 처리 실패 %s %s: %r", topic, msg, e)
 
         # 병 판정 결과 발행 (밀린 만큼 한꺼번에)
         if self.bottles_left == 0:

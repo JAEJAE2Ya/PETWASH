@@ -1,6 +1,6 @@
 """규칙 기반 세척 조건 추천
 
-입력: 배치 등급의 목표 레시피 + 최근 센서 값 (+ 세척 중 농도 감소 속도)
+입력: 세척 배치의 레시피(오염/비오염) + 최근 센서 값 (+ 세척 중 농도 감소 속도)
 출력: 조치 목록. 각 조치에는 근거 문장이 붙는다. 추천은 자동 적용하지 않는다.
 """
 from collections import deque
@@ -54,18 +54,19 @@ def _item(kind: str, level: str, action: str, reason: str) -> dict:
     return {"kind": kind, "level": level, "action": action, "reason": reason}
 
 
-def recommend(grade: int, recipes: dict, sensor: dict | None, decay: tuple | None,
+def recommend(recipe_key: str, recipes: dict, sensor: dict | None, decay: tuple | None,
               applied: bool = False) -> dict:
-    """applied=True 이면 장치가 이미 이 레시피 목표값으로 제어 중이므로,
+    """recipe_key: "contaminated" 또는 "clean"
+    applied=True 이면 장치가 이미 이 레시피 목표값으로 제어 중이므로,
     "필요" 대신 장치가 지금 하고 있는 일(가열 중, 투입 중)로 표시한다."""
-    recipe = recipes["grades"][grade]
+    recipe = recipes["recipes"][recipe_key]
     tol = recipes["tolerance"]
     target = {
         "target_concentration_pct": recipe["concentration_pct"],
         "target_temp_c": recipe["temp_c"],
         "wash_time_min": recipe["wash_time_min"],
     }
-    result = {"available": True, "grade": grade, "grade_name": recipe["name"], "target": target,
+    result = {"available": True, "recipe": recipe_key, "recipe_name": recipe["name"], "target": target,
               "applied": applied, "items": []}
     if sensor is None:
         result["items"].append(_item("sensor", "alert", "센서 값 없음", "장치에서 센서 값을 아직 받지 못했습니다."))
@@ -116,6 +117,7 @@ def recommend(grade: int, recipes: dict, sensor: dict | None, decay: tuple | Non
         items.append(_item("turbidity", "ok", "세척수 상태 양호", f"탁도 {turb:.1f} NTU ≤ 교체 기준 {limit} NTU"))
 
     # 4) 농도 감소 속도 (오염이 심하면 약품이 빨리 소모된다는 가정)
+    #    비오염 배치에서 소모가 빠르면 카메라 선별 오류(오염 병이 비오염 저장함으로 감)를 의심한다
     expected = recipe["expected_decay_pct_per_min"]
     factor = recipes["decay_alert_factor"]
     if decay is None:
@@ -124,9 +126,12 @@ def recommend(grade: int, recipes: dict, sensor: dict | None, decay: tuple | Non
     else:
         rate, minutes = decay
         basis = (f"최근 {minutes:.1f}분간 농도 감소 속도 {rate:.3f}%p/분, "
-                 f"등급 {grade} 기대치 {expected}%p/분의 {rate / expected:.1f}배 (기준 {factor}배)")
+                 f"{recipe['name']} 레시피 기대치 {expected}%p/분의 {rate / expected:.1f}배 (기준 {factor}배)")
         if rate > expected * factor:
-            action = "예상보다 오염이 심함, 등급 상향 검토" if grade < 3 else "예상보다 오염이 심함, 세척 시간 연장 검토"
+            if recipe_key == "clean":
+                action = "예상보다 오염이 심함: 선별 오류 의심, 오염 레시피로 변경 검토"
+            else:
+                action = "예상보다 오염이 심함: 세척 시간 연장 검토"
             items.append(_item("decay", "alert", action, basis))
         else:
             items.append(_item("decay", "ok", "약품 소모 속도 정상", basis))

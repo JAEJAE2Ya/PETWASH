@@ -20,27 +20,33 @@ TOPIC_SENSOR = "petwash/sensor/wash"
 TOPIC_CAMERA = "petwash/camera/result"
 TOPIC_SETPOINT = "petwash/control/setpoint"
 TOPIC_STATUS = "petwash/device/status"
-TOPIC_BATCH = "petwash/control/batch"  # 서버→장치: 배치 시작/종료 알림 (추가 토픽)
+TOPIC_BATCH = "petwash/control/batch"  # 서버→장치: 선별·저장함·세척 배치 명령 (추가 토픽)
 TOPIC_SIM = "petwash/control/sim"      # 서버→시뮬레이터: 시연용 배속 (추가 토픽, 실제 장치는 무시)
 
 HEARTBEAT_TIMEOUT_S = 15  # 이 시간 이상 하트비트가 없으면 "장치 연결 끊김"
 SENSOR_INTERVAL_S = 2     # 장치가 센서 값을 보내는 간격, 장치 시간 기준 (가동 시간 계산에 사용)
 
+# 선별 결과 = 저장함 = 레시피 키
+STREAMS = ("contaminated", "clean")
+STREAM_NAMES = {"contaminated": "오염", "clean": "비오염"}
+
+HEADER = (
+    "# 세척 레시피와 임계값 (웹 설정 화면에서 저장하면 이 파일이 다시 써집니다)\n"
+    "# recipes: 선별 결과(오염/비오염)별 세척 레시피. expected_decay_pct_per_min = 세척 중 약품 농도가 분당 줄어드는 기대 속도(%p/분)\n"
+    "# bin_threshold: 선별 저장함에 병이 이만큼 모이면 세척 배치 1개로 자동으로 묶는다 (병 수)\n"
+    "# safety: 안전 한계 (장치 코드 device/controller.py 와 같은 값이어야 함)\n"
+)
+
 
 def load_recipes() -> dict:
     with open(RECIPES_PATH, encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    # YAML 키가 숫자로 읽히므로 등급 키를 정수로 통일
-    data["grades"] = {int(k): v for k, v in data["grades"].items()}
-    return data
+        return yaml.safe_load(f)
 
 
 def save_recipes(data: dict) -> None:
-    with open(RECIPES_PATH, "w", encoding="utf-8") as f:
-        f.write("# 등급별 세척 레시피와 임계값 (웹 설정 화면에서 저장하면 이 파일이 다시 써집니다)\n"
-                "# expected_decay_pct_per_min: 세척 중 약품 농도가 분당 줄어드는 기대 속도(%p/분)\n"
-                "# grade_thresholds_pct: 오염 비율(%) 기준 [등급1 시작, 등급2 시작, 등급3 시작]\n"
-                "# safety: 안전 한계 (장치 코드 device/controller.py 와 같은 값이어야 함)\n")
+    # newline="\n": 윈도우에서도 줄바꿈을 LF로 저장 (CRLF로 바뀌면 git에서 파일 전체가 바뀐 것으로 보임)
+    with open(RECIPES_PATH, "w", encoding="utf-8", newline="\n") as f:
+        f.write(HEADER)
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
 
 
@@ -56,15 +62,3 @@ def check_setpoint(conc: float, temp: float, minutes: float, safety: dict) -> li
         if not (lo <= value <= hi):
             errors.append(f"{name} {value}{unit}는 안전 한계({lo}~{hi}{unit}) 밖입니다")
     return errors
-
-
-def suggest_grade(ratio_pct: float, thresholds: list) -> tuple[int, str]:
-    """오염 비율(%)로 등급을 제안하고, 근거 문장도 함께 돌려준다"""
-    t0, t1, t2 = thresholds
-    if ratio_pct < t0:
-        return 0, f"오염 비율 {ratio_pct:.1f}% < {t0}% → 등급 0"
-    if ratio_pct < t1:
-        return 1, f"오염 비율 {ratio_pct:.1f}%: {t0}% 이상 {t1}% 미만 → 등급 1"
-    if ratio_pct < t2:
-        return 2, f"오염 비율 {ratio_pct:.1f}%: {t1}% 이상 {t2}% 미만 → 등급 2"
-    return 3, f"오염 비율 {ratio_pct:.1f}% ≥ {t2}% → 등급 3"

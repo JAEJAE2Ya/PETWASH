@@ -102,6 +102,7 @@ main { flex: 1; width: 100%; max-width: 1300px; margin: 0 auto; padding: 18px 16
 .card .label { font-family: var(--font-small); font-size: 12px; color: var(--blue); }
 .card .value { font-family: var(--font-mono); font-size: 24px; line-height: 1.2; color: var(--strong); margin-top: 4px; }
 .card .sub { font-family: var(--font-small); font-size: 12px; color: var(--dim); margin-top: 2px; }
+.card .value.id { font-size: 15px; line-height: 1.6; } /* 배치 번호처럼 긴 값 */
 .on-text { color: var(--green) !important; }
 .off-text { color: var(--dim) !important; }
 
@@ -173,6 +174,17 @@ table.list tbody tr:hover { background: #eeeefa; }
 .ratio-bar div { height: 100%; background: repeating-linear-gradient(90deg, var(--red) 0 8px, transparent 8px 10px); }
 .grade-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
 .grade-row label { color: var(--blue); }
+.flow-hint { margin: 0 0 4px; color: var(--blue); }
+.warn-text { color: var(--amber); }
+
+/* 선별 저장함: 채워진 정도를 블록 막대로 (오염 = 빨강, 비오염 = 초록) */
+.bins { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.bin-box { border: 3px double var(--blue); padding: 6px 12px 8px; }
+.bin-box .l { font-family: var(--font-small); font-size: 12px; color: var(--blue); }
+.bin-box .n { font-family: var(--font-mono); font-size: 24px; color: var(--strong); }
+.bin-box .of { font-size: 15px; color: var(--dim); }
+.bin-box .ratio-bar { margin: 6px 0 8px; }
+.ratio-bar.clean div { background: repeating-linear-gradient(90deg, var(--green) 0 8px, transparent 8px 10px); }
 
 /* ---------- 추천 조치: [ OK ] [ !! ] 표시 ---------- */
 .rec-list { list-style: none; padding: 0; margin: 0 0 4px; }
